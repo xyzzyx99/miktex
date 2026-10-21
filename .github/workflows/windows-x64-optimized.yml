@@ -107,27 +107,37 @@ jobs:
             -FilePath $env:GITHUB_PATH `
             -Append -Encoding utf8
 
-      - name: Install Boost.Locale (Windows x64)
+      - name: Install Boost.Locale and ICU (Windows x64)
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $triplet = 'x64-windows-static-md'
+          $ErrorActionPreference = "Stop"
+          $triplet = "x64-windows-static-md"
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          if (-not $vcpkgRoot) { throw 'VCPKG_INSTALLATION_ROOT is not set' }
-          $vcpkg = Join-Path $vcpkgRoot 'vcpkg.exe'
-          if (-not (Test-Path $vcpkg)) { throw "vcpkg.exe not found: $vcpkg" }
-
-          & $vcpkg install "boost-locale:$triplet" --classic
+          $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
+      
+          & $vcpkg install "boost-locale:$triplet" "icu:$triplet" --classic
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $boostRoot = Join-Path $vcpkgRoot "installed/$triplet"
-          $header = Join-Path $boostRoot 'include/boost/config.hpp'
-          $libs = @(Get-ChildItem (Join-Path $boostRoot 'lib') -Filter '*boost_locale*.lib' -File -ErrorAction SilentlyContinue)
-          if (-not (Test-Path $header)) { throw "Boost header not found: $header" }
-          if ($libs.Count -eq 0) { throw "Boost.Locale library not found in $boostRoot/lib" }
-          Write-Host "Boost header: $header"
-          $libs | ForEach-Object { Write-Host "Boost.Locale: $($_.FullName)" }
-
+      
+          $root = Join-Path $vcpkgRoot "installed\$triplet"
+      
+          if (!(Test-Path "$root\include\boost\config.hpp")) {
+            throw "Boost headers not found"
+          }
+      
+          if (!(Test-Path "$root\include\unicode\utypes.h")) {
+            throw "ICU headers not found"
+          }
+      
+          Write-Host "Boost.Locale libraries:"
+          Get-ChildItem "$root\lib" -Filter "*boost_locale*.lib"
+      
+          Write-Host "ICU libraries:"
+          Get-ChildItem "$root\lib" -Filter "icu*.lib"
+      
+          $root = $root -replace '\\', '/'
+          "BOOST_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
+          "ICU_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
+          
       - name: Configure Release x64 AVX2
         shell: pwsh
         run: |
@@ -163,6 +173,8 @@ jobs:
             "-DBOOST_LIBRARYDIR=$(Join-Path $boostRoot 'lib')"
             '-DBoost_USE_STATIC_LIBS=ON'
             '-DBoost_USE_STATIC_RUNTIME=OFF'
+            "-DICU_ROOT=$env:ICU_INSTALL_ROOT"
+            "-DICU_INCLUDE_DIR=$env:ICU_INSTALL_ROOT/include"
           )
 
           & cmake @cmakeArgs
