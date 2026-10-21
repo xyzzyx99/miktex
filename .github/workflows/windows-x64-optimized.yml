@@ -178,54 +178,75 @@ jobs:
           & cmake @cmakeArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Enable crash dumps for MiKTeX build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
+          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+
+          # Windows Error Reporting LocalDumps; no administrator rights required.
+          # Full dumps can contain memory and potentially sensitive data.
+          foreach ($process in @('fc-case.exe', 'miktex-tangle.exe', 'miktex-ctangle.exe')) {
+            $key = "HKCU:\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\$process"
+            New-Item -Path $key -Force | Out-Null
+            New-ItemProperty -Path $key -Name DumpFolder -Value $dumpDir -PropertyType ExpandString -Force | Out-Null
+            New-ItemProperty -Path $key -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -Path $key -Name DumpCount -Value 5 -PropertyType DWord -Force | Out-Null
+            Write-Host "Configured full crash dumps for $process in $dumpDir"
+          }
+
       - name: Diagnose Fontconfig generator
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-      
-          cmake --build build --config Release --target fc-case --parallel 1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      
+          $log = Join-Path $env:GITHUB_WORKSPACE 'fontconfig-build.log'
+          $binlog = Join-Path $env:GITHUB_WORKSPACE 'fontconfig-build.binlog'
+
+          # Capture the generator build even when it fails before the full build.
+          & cmake --build build --config Release --target fc-case --parallel 1 -- /v:minimal "/bl:$binlog" 2>&1 |
+            Tee-Object -FilePath $log
+          $buildExitCode = $LASTEXITCODE
+          if ($buildExitCode -ne 0) { exit $buildExitCode }
+
           $exe = Join-Path $env:GITHUB_WORKSPACE 'build/sandbox/miktex/bin/x64/fc-case.exe'
           $source = Join-Path $env:GITHUB_WORKSPACE 'Libraries/3rd/fontconfig/source/fc-case'
           $output = Join-Path $env:GITHUB_WORKSPACE 'fc-case-test.h'
           $errors = Join-Path $env:GITHUB_WORKSPACE 'fc-case-stderr.log'
           $inputFile = Join-Path $source 'fccase.tmpl.h'
           $caseFile = Join-Path $source 'CaseFolding.txt'
-      
-          if (-not (Test-Path $exe)) { throw "Missing: $exe" }
-      
+
+          foreach ($file in @($exe, $inputFile, $caseFile)) {
+            if (-not (Test-Path $file)) { throw "Missing: $file" }
+          }
           Write-Host "Executable: $exe"
-      
+
+          # Run the generated utility separately; stderr and stdout are persisted.
           $command = '"{0}" "{1}" < "{2}" > "{3}" 2> "{4}"' -f `
             $exe, $caseFile, $inputFile, $output, $errors
-      
           & cmd.exe /d /c $command
           $result = $LASTEXITCODE
-      
           Write-Host "fc-case exit code: $result"
           Write-Host ('Exit code hex: 0x{0:X8}' -f ([uint32]([int64]$result -band 0xffffffffL)))
-      
-          if (Test-Path $errors) {
-            Get-Content $errors
-          }
-      
+          if (Test-Path $errors) { Get-Content $errors }
+          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
+          $dumps = @(Get-ChildItem $dumpDir -Filter '*.dmp' -File -ErrorAction SilentlyContinue)
+          Write-Host "Crash dumps produced: $($dumps.Count)"
+          $dumps | ForEach-Object { Write-Host "$($_.Name) ($($_.Length) bytes)" }
           if ($result -ne 0) { exit 1 }
 
       - name: Build Release
         shell: pwsh
         run: |
-          $log = Join-Path $env:GITHUB_WORKSPACE "build.log"
-          $binlog = Join-Path $env:GITHUB_WORKSPACE "build.binlog"
-      
-          & cmake --build build --config Release `
-            --target gen-fccase-header --parallel 1 `
-            -- /v:minimal "/bl:$binlog" 2>&1 |
+          $log = Join-Path $env:GITHUB_WORKSPACE 'build.log'
+          $binlog = Join-Path $env:GITHUB_WORKSPACE 'build.binlog'
+
+          # Build all targets, not only the fontconfig header generator.
+          & cmake --build build --config Release --parallel 4 -- /v:minimal "/bl:$binlog" 2>&1 |
             Tee-Object -FilePath $log
-      
           $result = $LASTEXITCODE
           if ($result -ne 0) { exit $result }
-          
+
       - name: Stage executables (not an installer)
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/bin | Out-Null
@@ -260,11 +281,14 @@ jobs:
           path: |
             build.log
             build.binlog
+            fontconfig-build.log
+            fontconfig-build.binlog
             build/CMakeCache.txt
             build/CMakeFiles/CMakeConfigureLog.yaml
             build/CMakeFiles/CMakeError.log
             build/CMakeFiles/CMakeOutput.log
             fc-case-stderr.log
             fc-case-test.h
+            crash-dumps/
           if-no-files-found: warn
           retention-days: 14
