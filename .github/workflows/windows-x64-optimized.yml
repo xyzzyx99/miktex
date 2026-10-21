@@ -111,7 +111,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $triplet = "x64-windows-static-md"
+          $triplet = "x64-windows-static"
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
       
@@ -145,7 +145,7 @@ jobs:
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           if (-not $vcpkgRoot) { throw 'VCPKG_INSTALLATION_ROOT is not set' }
           $toolchain = Join-Path $vcpkgRoot 'scripts/buildsystems/vcpkg.cmake'
-          $boostRoot = Join-Path $vcpkgRoot 'installed/x64-windows-static-md'
+          $boostRoot = Join-Path $vcpkgRoot 'installed/x64-windows-static'
           if (-not (Test-Path $toolchain)) { throw "vcpkg toolchain not found: $toolchain" }
           Write-Host "Using toolchain: $toolchain"
 
@@ -164,13 +164,13 @@ jobs:
             '-DCMAKE_C_FLAGS_RELEASE=/O2 /Oi /arch:AVX2 /DNDEBUG'
             '-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Oi /arch:AVX2 /DNDEBUG'
             "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
-            '-DVCPKG_TARGET_TRIPLET=x64-windows-static-md'
+            '-DVCPKG_TARGET_TRIPLET=x64-windows-static'
             "-DBOOST_ROOT=$boostRoot"
             "-DBoost_ROOT=$boostRoot"
             "-DBoost_INCLUDE_DIR=$(Join-Path $boostRoot 'include')"
             "-DBOOST_LIBRARYDIR=$(Join-Path $boostRoot 'lib')"
             '-DBoost_USE_STATIC_LIBS=ON'
-            '-DBoost_USE_STATIC_RUNTIME=OFF'
+            '-DBoost_USE_STATIC_RUNTIME=ON'
             "-DICU_ROOT=$env:ICU_INSTALL_ROOT"
             "-DICU_INCLUDE_DIR=$env:ICU_INSTALL_ROOT/include"
           )
