@@ -178,6 +178,40 @@ jobs:
           & cmake @cmakeArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Diagnose Fontconfig generator
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+      
+          cmake --build build --config Release --target fc-case --parallel 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'build/sandbox/miktex/bin/x64/fc-case.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'Libraries/3rd/fontconfig/source/fc-case'
+          $output = Join-Path $env:GITHUB_WORKSPACE 'fc-case-test.h'
+          $errors = Join-Path $env:GITHUB_WORKSPACE 'fc-case-stderr.log'
+          $inputFile = Join-Path $source 'fccase.tmpl.h'
+          $caseFile = Join-Path $source 'CaseFolding.txt'
+      
+          if (-not (Test-Path $exe)) { throw "Missing: $exe" }
+      
+          Write-Host "Executable: $exe"
+      
+          $command = '"{0}" "{1}" < "{2}" > "{3}" 2> "{4}"' -f `
+            $exe, $caseFile, $inputFile, $output, $errors
+      
+          & cmd.exe /d /c $command
+          $result = $LASTEXITCODE
+      
+          Write-Host "fc-case exit code: $result"
+          Write-Host ('Exit code hex: 0x{0:X8}' -f ([uint32]([int64]$result -band 0xffffffffL)))
+      
+          if (Test-Path $errors) {
+            Get-Content $errors
+          }
+      
+          if ($result -ne 0) { exit 1 }
+
       - name: Build Release
         shell: pwsh
         run: |
@@ -230,5 +264,7 @@ jobs:
             build/CMakeFiles/CMakeConfigureLog.yaml
             build/CMakeFiles/CMakeError.log
             build/CMakeFiles/CMakeOutput.log
+            fc-case-stderr.log
+            fc-case-test.h
           if-no-files-found: warn
           retention-days: 14
