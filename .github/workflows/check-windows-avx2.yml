@@ -65,6 +65,24 @@ jobs:
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
           if (-not (Test-Path $vcvars)) { throw "Not found: $vcvars" }
 
-          & cmd.exe /d /s /c "`"`"$vcvars`" >nul && cl /nologo /EHsc avx2-check.cpp /Fe:avx2-check.exe && avx2-check.exe`""
-          $result = $LASTEXITCODE
-          if ($result -ne 0) { throw "AVX2 is unavailable, or compilation/test failed (exit $result)" }
+          # Run via a batch file to avoid nested PowerShell/cmd quoting.
+          $env:VCVARS = $vcvars
+          $batch = Join-Path $env:RUNNER_TEMP 'run-avx2-check.cmd'
+          @'
+          @echo off
+          call "%VCVARS%" >nul
+          if errorlevel 1 exit /b 2
+          cl /nologo /EHsc /arch:AVX2 avx2-check.cpp /Fe:avx2-check.exe
+          if errorlevel 1 exit /b 3
+          avx2-check.exe
+          exit /b %errorlevel%
+          '@ | Set-Content -Path $batch -Encoding ascii
+
+          Push-Location $env:GITHUB_WORKSPACE
+          try {
+            & $batch
+            $result = $LASTEXITCODE
+          } finally {
+            Pop-Location
+          }
+          if ($result -ne 0) { throw "AVX2 test failed (exit $result)" }
