@@ -34,6 +34,38 @@ jobs:
           choco install -y ninja winflexbison3 strawberryperl --no-progress
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # MiKTeX's CMake configuration requires GNU gettext and other
+      # Unix-style host utilities (msgfmt, msgmerge, xgettext, xsltproc,
+      # cat, diff, sed). Install them as tools; this is still an MSVC build.
+      - name: Install GNU build utilities (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: >-
+            gettext
+            diffutils
+            sed
+            libxslt
+
+      - name: Make GNU utilities available to CMake
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msysBin = 'C:\msys64\usr\bin'
+          if (-not (Test-Path (Join-Path $msysBin 'msgfmt.exe'))) {
+            throw "msgfmt.exe not found in $msysBin; check MSYS2 setup"
+          }
+          # Persist for all subsequent steps, including CMake build rules.
+          $msysBin >> $env:GITHUB_PATH
+          $env:PATH = "$msysBin;$env:PATH"
+          foreach ($tool in @('msgfmt', 'msgmerge', 'xgettext', 'xsltproc', 'cat', 'diff', 'sed')) {
+            $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+            if (-not $cmd) { throw "Missing required MiKTeX build utility: $tool" }
+            Write-Host "$tool => $($cmd.Source)"
+          }
+          & (Join-Path $msysBin 'msgfmt.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # MiKTeX uses Qt in parts of its Windows user interface.
       # Adjust Qt version/arch when the checked-out MiKTeX revision requires another version.
       - name: Install Qt 6 (MSVC x64)
