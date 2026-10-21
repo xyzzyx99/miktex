@@ -184,18 +184,13 @@ jobs:
           $log = Join-Path $env:GITHUB_WORKSPACE "build.log"
           $binlog = Join-Path $env:GITHUB_WORKSPACE "build.binlog"
       
-          cmd.exe /d /c "cmake --build build --config Release --parallel 4 -- /v:minimal /bl:build.binlog 2>&1" |
+          & cmake --build build --config Release `
+            --target gen-fccase-header --parallel 1 `
+            -- /v:minimal "/bl:$binlog" 2>&1 |
             Tee-Object -FilePath $log
       
           $result = $LASTEXITCODE
-      
-          Write-Host "Build exit code: $result"
-          Write-Host "Text log: $log"
-          Write-Host "Binary log: $binlog"
-      
-          if ($result -ne 0) {
-            exit $result
-          }
+          if ($result -ne 0) { exit $result }
           
       - name: Stage executables (not an installer)
         run: |
