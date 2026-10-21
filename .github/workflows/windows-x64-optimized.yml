@@ -107,37 +107,20 @@ jobs:
             -FilePath $env:GITHUB_PATH `
             -Append -Encoding utf8
 
-      - name: Install and verify Boost.Locale
+      - name: Install Boost.Locale (Windows x64)
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          $triplet = "x64-windows-static-md"
-          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
+          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe"
       
-          & $vcpkg install "boost-locale:$triplet" --classic
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      
-          $root = Join-Path $vcpkgRoot "installed\$triplet"
-      
-          $header = Join-Path $root "include\boost\config.hpp"
-          if (!(Test-Path $header)) {
-            throw "Boost header missing: $header"
+          if (-not (Test-Path $vcpkg)) {
+            throw "vcpkg.exe not found: $vcpkg"
           }
       
-          $libs = @(Get-ChildItem (Join-Path $root "lib") `
-            -Filter "*boost_locale*.lib" -ErrorAction SilentlyContinue)
-      
-          if ($libs.Count -eq 0) {
-            throw "Boost.Locale library not found"
+          & $vcpkg install boost-locale:x64-windows --classic
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
           }
-      
-          Write-Host "Boost header: $header"
-          $libs | ForEach-Object { Write-Host $_.FullName }
-      
-          "BOOST_INSTALL_ROOT=$($root -replace '\\','/')" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-            
+          
       - name: Configure Release x64 AVX2
         run: |
           $ErrorActionPreference = 'Stop'
@@ -151,7 +134,10 @@ jobs:
             -DCMAKE_C_FLAGS_RELEASE="/O2 /Oi /GL /arch:AVX2 /DNDEBUG" `
             -DCMAKE_CXX_FLAGS_RELEASE="/O2 /Oi /GL /arch:AVX2 /DNDEBUG" `
             -DCMAKE_EXE_LINKER_FLAGS_RELEASE="/LTCG" `
-            -DCMAKE_SHARED_LINKER_FLAGS_RELEASE="/LTCG"
+            -DCMAKE_SHARED_LINKER_FLAGS_RELEASE="/LTCG" `
+            -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows
+            
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Release
