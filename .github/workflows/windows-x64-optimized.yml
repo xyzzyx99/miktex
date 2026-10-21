@@ -196,6 +196,24 @@ jobs:
             Write-Host "Configured full crash dumps for $process in $dumpDir"
           }
 
+      - name: Verify crash dump configuration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
+          foreach ($process in @('fc-case.exe', 'miktex-tangle.exe', 'miktex-ctangle.exe')) {
+            $key = "HKCU:\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\$process"
+            Write-Host "Checking $key"
+            if (-not (Test-Path $key)) { throw "Missing WER registry key: $key" }
+            $settings = Get-ItemProperty -Path $key
+            $settings | Select-Object DumpFolder, DumpType, DumpCount | Format-List
+            if ($settings.DumpType -ne 2 -or $settings.DumpFolder -ne $dumpDir) {
+              throw "Incorrect WER dump settings for $process"
+            }
+          }
+          Write-Host "Dump directory: $dumpDir"
+          Get-ChildItem -LiteralPath $dumpDir -Force | Select-Object Name, Length
+
       - name: Diagnose Fontconfig generator
         shell: pwsh
         run: |
@@ -234,6 +252,36 @@ jobs:
           Write-Host "Crash dumps produced: $($dumps.Count)"
           $dumps | ForEach-Object { Write-Host "$($_.Name) ($($_.Length) bytes)" }
           if ($result -ne 0) { exit 1 }
+
+      - name: Collect crash event details
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE 'crash-events.log'
+          $now = Get-Date
+          "Application crash events collected at $now" | Set-Content -Path $log
+          try {
+            $events = @(Get-WinEvent -FilterHashtable @{
+              LogName = 'Application'
+              StartTime = $now.AddHours(-3)
+            } -ErrorAction Stop | Where-Object {
+              $_.ProviderName -in @('Application Error', 'Windows Error Reporting') -and
+              $_.Message -match 'fc-case|miktex-tangle|miktex-ctangle'
+            })
+            if ($events.Count -eq 0) {
+              'No matching crash events found.' | Add-Content -Path $log
+            } else {
+              $events | Format-List TimeCreated, Id, ProviderName, Message |
+                Out-String -Width 4096 | Add-Content -Path $log
+            }
+          } catch {
+            "Could not query Windows Application event log: $_" | Add-Content -Path $log
+          }
+          Get-Content -Path $log
+          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
+          if (Test-Path $dumpDir) {
+            Get-ChildItem $dumpDir -Recurse -File | Select-Object FullName, Length
+          }
 
       - name: Build Release
         shell: pwsh
@@ -290,5 +338,6 @@ jobs:
             fc-case-stderr.log
             fc-case-test.h
             crash-dumps/
+            crash-events.log
           if-no-files-found: warn
           retention-days: 14
