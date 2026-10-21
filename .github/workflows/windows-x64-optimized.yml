@@ -161,10 +161,8 @@ jobs:
             '-DWITH_UI_MFC=OFF'
             "-DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/stage"
             "-DCMAKE_PREFIX_PATH=${{ steps.qt.outputs.prefix }}"
-            '-DCMAKE_C_FLAGS_RELEASE=/O2 /Oi /GL /arch:AVX2 /DNDEBUG'
-            '-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Oi /GL /arch:AVX2 /DNDEBUG'
-            '-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/LTCG'
-            '-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/LTCG'
+            '-DCMAKE_C_FLAGS_RELEASE=/O2 /Oi /arch:AVX2 /DNDEBUG'
+            '-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Oi /arch:AVX2 /DNDEBUG'
             "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
             '-DVCPKG_TARGET_TRIPLET=x64-windows-static-md'
             "-DBOOST_ROOT=$boostRoot"
