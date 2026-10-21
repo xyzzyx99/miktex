@@ -181,21 +181,20 @@ jobs:
       - name: Build Release
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:GITHUB_WORKSPACE "build.log"
+          $binlog = Join-Path $env:GITHUB_WORKSPACE "build.binlog"
       
-          Write-Host "Testing fontconfig header generator..."
-          cmake --build build --config Release `
-            --target gen-fccase-header --parallel 1 -- /v:diagnostic
+          cmd.exe /d /c "cmake --build build --config Release --parallel 4 -- /v:minimal /bl:build.binlog 2>&1" |
+            Tee-Object -FilePath $log
       
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
+          $result = $LASTEXITCODE
       
-          Write-Host "Building MiKTeX..."
-          cmake --build build --config Release --parallel 4
+          Write-Host "Build exit code: $result"
+          Write-Host "Text log: $log"
+          Write-Host "Binary log: $binlog"
       
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+          if ($result -ne 0) {
+            exit $result
           }
           
       - name: Stage executables (not an installer)
@@ -231,21 +230,10 @@ jobs:
           name: miktex-build-diagnostics
           path: |
             build.log
+            build.binlog
             build/CMakeCache.txt
             build/CMakeFiles/CMakeConfigureLog.yaml
             build/CMakeFiles/CMakeError.log
             build/CMakeFiles/CMakeOutput.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
-
-      - name: Upload CMake configuration details (even on failure)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: miktex-build-diagnostics
-          path: |
-            build/CMakeCache.txt
-            build/CMakeFiles/CMakeConfigureLog.yaml
-            build/CMakeFiles/CMakeError.log
-            build/CMakeFiles/CMakeOutput.log
-          if-no-files-found: ignore
