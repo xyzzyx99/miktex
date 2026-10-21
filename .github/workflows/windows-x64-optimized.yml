@@ -107,24 +107,37 @@ jobs:
             -FilePath $env:GITHUB_PATH `
             -Append -Encoding utf8
 
-      - name: Install Boost.Locale (Windows x64)
+      - name: Install and verify Boost.Locale
         shell: pwsh
         run: |
-          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe"
+          $ErrorActionPreference = "Stop"
+          $triplet = "x64-windows-static-md"
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
       
-          & $vcpkg install boost-locale:x64-windows-static-md --classic
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+          & $vcpkg install "boost-locale:$triplet" --classic
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      
+          $root = Join-Path $vcpkgRoot "installed\$triplet"
+      
+          $header = Join-Path $root "include\boost\config.hpp"
+          if (!(Test-Path $header)) {
+            throw "Boost header missing: $header"
           }
       
-          $root = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md"
+          $libs = @(Get-ChildItem (Join-Path $root "lib") `
+            -Filter "*boost_locale*.lib" -ErrorAction SilentlyContinue)
       
-          if (-not (Test-Path "$root\include\boost")) {
-            throw "Boost headers not installed"
+          if ($libs.Count -eq 0) {
+            throw "Boost.Locale library not found"
           }
       
-          Get-ChildItem "$root\lib" -Filter "*boost_locale*"
-          
+          Write-Host "Boost header: $header"
+          $libs | ForEach-Object { Write-Host $_.FullName }
+      
+          "BOOST_INSTALL_ROOT=$($root -replace '\\','/')" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+            
       - name: Configure Release x64 AVX2
         run: |
           $ErrorActionPreference = 'Stop'
