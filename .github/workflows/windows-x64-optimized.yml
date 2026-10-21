@@ -91,7 +91,8 @@ jobs:
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_CONFIGURATION_TYPES=Release `
             -DWITH_MIKTEX_API_DOC=OFF `
-            -DWITH_MIKTEX_DOC=OFF `
+            -DWITH_MIKTEX_DOC=OFF
+            -DWITH_UI_MFC=OFF
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/stage" `
             -DCMAKE_PREFIX_PATH="${{ steps.qt.outputs.prefix }}" `
             -DCMAKE_C_FLAGS_RELEASE="/O2 /Oi /GL /arch:AVX2 /DNDEBUG" `
