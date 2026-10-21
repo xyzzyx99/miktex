@@ -1,0 +1,110 @@
+name: MiKTeX Windows x64 optimized (experimental)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Build tool versions
+        run: |
+          cmake --version
+          git --version
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+
+      - name: Install helper tools
+        run: |
+          choco install -y ninja winflexbison3 strawberryperl --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # MiKTeX uses Qt in parts of its Windows user interface.
+      # Adjust Qt version/arch when the checked-out MiKTeX revision requires another version.
+      - name: Install Qt 6 (MSVC x64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Locate Qt
+        id: qt
+        run: |
+          if (-not $env:QT_ROOT_DIR) { throw 'QT_ROOT_DIR is missing after Qt installation' }
+          $prefix = $env:QT_ROOT_DIR
+          "prefix=$prefix" >> $env:GITHUB_OUTPUT
+          Write-Host "Qt prefix: $prefix"
+
+      - name: Configure Release x64 AVX2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_CONFIGURATION_TYPES=Release `
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/stage" `
+            -DCMAKE_PREFIX_PATH="${{ steps.qt.outputs.prefix }}" `
+            -DCMAKE_C_FLAGS_RELEASE="/O2 /Oi /GL /arch:AVX2 /DNDEBUG" `
+            -DCMAKE_CXX_FLAGS_RELEASE="/O2 /Oi /GL /arch:AVX2 /DNDEBUG" `
+            -DCMAKE_EXE_LINKER_FLAGS_RELEASE="/LTCG" `
+            -DCMAKE_SHARED_LINKER_FLAGS_RELEASE="/LTCG"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Release
+        run: |
+          cmake --build build --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage executables (not an installer)
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/bin | Out-Null
+          $bins = Get-ChildItem build -Recurse -File -Filter *.exe | Where-Object { $_.FullName -match '[\\/]Release[\\/]' }
+          if (-not $bins) { throw 'No Release .exe files found; inspect build layout.' }
+          foreach ($f in $bins) {
+            # Flattening names can collide; retain relative path under build.
+            $relative = [IO.Path]::GetRelativePath((Resolve-Path build).Path, $f.FullName)
+            $dest = Join-Path 'artifacts/bin' $relative
+            New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+            Copy-Item -LiteralPath $f.FullName -Destination $dest
+          }
+          @'
+          Experimental MiKTeX Windows x64 build artifact.
+          Not a self-contained distribution or installer.
+          Built executables may need DLLs, data, and configuration files.
+          '@ | Set-Content artifacts/README.txt
+
+      - name: Upload compiled binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-windows-x64-avx2-build
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload CMake configuration details (even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-build-diagnostics
+          path: |
+            build/CMakeCache.txt
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/CMakeFiles/CMakeError.log
+            build/CMakeFiles/CMakeOutput.log
+          if-no-files-found: ignore
