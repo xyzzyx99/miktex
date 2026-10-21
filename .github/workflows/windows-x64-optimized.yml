@@ -112,14 +112,18 @@ jobs:
         run: |
           $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe"
       
-          if (-not (Test-Path $vcpkg)) {
-            throw "vcpkg.exe not found: $vcpkg"
-          }
-      
-          & $vcpkg install boost-locale:x64-windows --classic
+          & $vcpkg install boost-locale:x64-windows-static-md --classic
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
+      
+          $root = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md"
+      
+          if (-not (Test-Path "$root\include\boost")) {
+            throw "Boost headers not installed"
+          }
+      
+          Get-ChildItem "$root\lib" -Filter "*boost_locale*"
           
       - name: Configure Release x64 AVX2
         run: |
