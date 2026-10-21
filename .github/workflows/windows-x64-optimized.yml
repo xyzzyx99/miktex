@@ -179,10 +179,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Release
+        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+      
+          Write-Host "Testing fontconfig header generator..."
+          cmake --build build --config Release `
+            --target gen-fccase-header --parallel 1 -- /v:diagnostic
+      
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+      
+          Write-Host "Building MiKTeX..."
           cmake --build build --config Release --parallel 4
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
+      
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          
       - name: Stage executables (not an installer)
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/bin | Out-Null
@@ -207,6 +222,20 @@ jobs:
           name: miktex-windows-x64-avx2-build
           path: artifacts/
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics (even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-build-diagnostics
+          path: |
+            build.log
+            build/CMakeCache.txt
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/CMakeFiles/CMakeError.log
+            build/CMakeFiles/CMakeOutput.log
+          if-no-files-found: ignore
           retention-days: 14
 
       - name: Upload CMake configuration details (even on failure)
