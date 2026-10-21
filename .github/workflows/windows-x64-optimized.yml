@@ -75,6 +75,8 @@ jobs:
           host: windows
           target: desktop
           arch: win64_msvc2022_64
+          modules: 'qt5compat'
+          dir: '${{ github.workspace }}/Qt'          
           cache: true
 
       - name: Locate Qt
