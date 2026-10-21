@@ -1,0 +1,70 @@
+name: Check Windows runner AVX2 support
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-avx2:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Show runner CPU
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor |
+            Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors |
+            Format-List
+
+      - name: Compile and run AVX2 capability test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          #include <cstdio>
+          #include <intrin.h>
+
+          int main() {
+              int info[4] = {};
+              __cpuid(info, 0);
+              unsigned int maxLeaf = static_cast<unsigned int>(info[0]);
+
+              bool osxsave = false;
+              bool avx = false;
+              if (maxLeaf >= 1) {
+                  __cpuid(info, 1);
+                  osxsave = (info[2] & (1 << 27)) != 0;
+                  avx = (info[2] & (1 << 28)) != 0;
+              }
+
+              bool osAvx = false;
+              if (osxsave && avx) {
+                  unsigned __int64 xcr0 = _xgetbv(0);
+                  osAvx = (xcr0 & 0x6) == 0x6;
+              }
+
+              bool cpuAvx2 = false;
+              if (maxLeaf >= 7) {
+                  __cpuidex(info, 7, 0);
+                  cpuAvx2 = (info[1] & (1 << 5)) != 0;
+              }
+
+              std::printf("CPU AVX: %s\n", avx ? "YES" : "NO");
+              std::printf("CPU AVX2: %s\n", cpuAvx2 ? "YES" : "NO");
+              std::printf("OS AVX state support: %s\n", osAvx ? "YES" : "NO");
+              std::printf("AVX2 usable: %s\n", (cpuAvx2 && osAvx) ? "YES" : "NO");
+              return (cpuAvx2 && osAvx) ? 0 : 1;
+          }
+          '@ | Set-Content -Path avx2-check.cpp -Encoding utf8
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
+          if (-not $vs) { throw 'Visual Studio C++ tools not found' }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { throw "Not found: $vcvars" }
+
+          & cmd.exe /d /s /c "`"`"$vcvars`" >nul && cl /nologo /EHsc avx2-check.cpp /Fe:avx2-check.exe && avx2-check.exe`""
+          $result = $LASTEXITCODE
+          if ($result -ne 0) { throw "AVX2 is unavailable, or compilation/test failed (exit $result)" }
