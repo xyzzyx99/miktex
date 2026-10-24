@@ -55,23 +55,11 @@ jobs:
           "VS_INSTALL_PATH=$vs" >> $env:GITHUB_ENV
           Write-Host "MSVC v142 directory: $($v142[0].FullName)"
 
-      - name: Verify MSVC v142 compiler
-        shell: pwsh
+      - name: Verify VS2019 v142 compiler
         run: |
           $ErrorActionPreference = 'Stop'
-      
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = (& $vswhere -latest -property installationPath).Trim()
-      
-          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvarsall.bat"
-      
-          if (!(Test-Path $vcvars)) {
-            throw "vcvarsall.bat not found"
-          }
-      
-          # Initialize v142 and verify its actual compiler.
-          $script = Join-Path $env:RUNNER_TEMP "check-v142.cmd"
-      
+          $vcvars = Join-Path $env:VS_INSTALL_PATH 'VC/Auxiliary/Build/vcvarsall.bat'
+          $script = Join-Path $env:RUNNER_TEMP 'verify-v142.cmd'
           @(
             '@echo off'
             "call `"$vcvars`" x64 -vcvars_ver=14.29"
@@ -81,16 +69,53 @@ jobs:
             'echo int main(void) { return 0; } > "%TEMP%\v142-test.c"'
             'cl /nologo /c /Fo"%TEMP%\v142-test.obj" "%TEMP%\v142-test.c"'
             'exit /b %errorlevel%'
-          ) | Set-Content $script -Encoding ascii
-      
-          & cmd.exe /d /c $script
-      
-          if ($LASTEXITCODE -ne 0) {
-            throw "MSVC v142 compiler test failed."
+          ) | Set-Content -LiteralPath $script -Encoding ascii
+          & cmd.exe /d /c $script 2>&1 | Tee-Object -FilePath v142-compiler.log
+          if ($LASTEXITCODE -ne 0) { throw 'v142 compiler compilation test failed' }
+          $logText = Get-Content v142-compiler.log -Raw
+          if ($logText -notmatch 'Version 19\.2[0-9]\.') {
+            throw 'Active compiler is not VS2019 MSVC 19.2x. Refusing to use v143.'
           }
-      
-          Write-Host "MSVC v142 compiler verified successfully."
-          
+
+      - name: Install helper tools
+        run: |
+          choco install -y ninja winflexbison3 strawberryperl procdump --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Locate Flex and Bison
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:ChocolateyInstall 'lib\winflexbison3\tools'
+          if (-not (Test-Path $tools)) { throw "winflexbison3 tools directory missing: $tools" }
+          $bison = Get-ChildItem $tools -Recurse -File -Filter win_bison.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          $flex = Get-ChildItem $tools -Recurse -File -Filter win_flex.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $bison) { throw "win_bison.exe not found beneath $tools" }
+          if (-not $flex) { throw "win_flex.exe not found beneath $tools" }
+          & $bison --version
+          if ($LASTEXITCODE -ne 0) { throw 'Bison failed to execute' }
+          & $flex --version
+          if ($LASTEXITCODE -ne 0) { throw 'Flex failed to execute' }
+          "BISON_EXECUTABLE=$bison" >> $env:GITHUB_ENV
+          "FLEX_EXECUTABLE=$flex" >> $env:GITHUB_ENV
+          Write-Host "Bison: $bison"
+          Write-Host "Flex: $flex"
+
+      # MiKTeX's CMake configuration requires GNU gettext and other
+      # Unix-style host utilities (msgfmt, msgmerge, xgettext, xsltproc,
+      # cat, diff, sed). Install them as tools; this is still an MSVC build.
+      - name: Install GNU build utilities (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: >-
+            gettext
+            diffutils
+            sed
+            libxslt
+
       - name: Make GNU utilities available to CMake
         run: |
           $ErrorActionPreference = 'Stop'
@@ -223,6 +248,8 @@ jobs:
             '-DCMAKE_CXX_FLAGS_RELEASE=/Od /Ob0 /Zi /DNDEBUG'
             '-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/DEBUG:FULL'
             '-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/DEBUG:FULL'
+            "-DBISON_EXECUTABLE=$env:BISON_EXECUTABLE"
+            "-DFLEX_EXECUTABLE=$env:FLEX_EXECUTABLE"
             "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
             '-DVCPKG_TARGET_TRIPLET=x64-windows-static-v142'
             "-DVCPKG_OVERLAY_TRIPLETS=$env:GITHUB_WORKSPACE/triplets"
@@ -442,7 +469,6 @@ jobs:
             run-fc-case-procdump.cmd
             crash-dumps/
             crash-events.log
-            v140-compiler.log
             triplets/
             debug-symbols/
           if-no-files-found: warn
