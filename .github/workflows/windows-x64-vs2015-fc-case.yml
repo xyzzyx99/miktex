@@ -1,0 +1,224 @@
+name: MiKTeX VS2015 x64 Fontconfig compatibility test
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_build:
+        description: 'Attempt full MiKTeX build after fc-case test succeeds'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+# Requires a self-hosted Windows x64 runner tagged vs2015, with VS2015 C++
+# x64 tools and v140-compatible Qt5 / Boost.Locale / ICU already provisioned.
+# Installing a modern vcpkg tree does NOT produce VS2015-compatible binaries.
+jobs:
+  test:
+    runs-on: [self-hosted, Windows, X64, vs2015]
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Override these with runner environment variables or repository variables.
+      # Github repository variables take precedence when nonempty.
+      QT5_ROOT: ${{ vars.VS2015_QT5_ROOT }}
+      BOOST_ROOT_LEGACY: ${{ vars.VS2015_BOOST_ROOT }}
+      ICU_ROOT_LEGACY: ${{ vars.VS2015_ICU_ROOT }}
+      VS2015_ROOT: ${{ vars.VS2015_ROOT }}
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+
+    steps:
+      - name: Checkout MiKTeX with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Check VS2015 and compatible library prerequisites
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = $env:VS2015_ROOT
+          if (-not $vs) { $vs = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio 14.0' }
+          $vcvars = Join-Path $vs 'VC\vcvarsall.bat'
+          if (-not (Test-Path $vcvars)) { throw "VS2015 C++ tools missing. Install VS2015 with x64 C++ tools: $vcvars" }
+          $qt = $env:QT5_ROOT
+          $boost = $env:BOOST_ROOT_LEGACY
+          $icu = $env:ICU_ROOT_LEGACY
+          if (-not $qt) { $qt = 'C:\deps\qt5-vs2015' }
+          if (-not $boost) { $boost = 'C:\deps\boost-v140-x64' }
+          if (-not $icu) { $icu = 'C:\deps\icu-v140-x64' }
+          $checks = @(
+            @{ Name = 'Qt5'; Path = (Join-Path $qt 'lib\cmake\Qt5\Qt5Config.cmake') },
+            @{ Name = 'Boost'; Path = (Join-Path $boost 'boost\config.hpp') },
+            @{ Name = 'ICU'; Path = (Join-Path $icu 'include\unicode\utypes.h') }
+          )
+          # Boost root may be an installation prefix with include/boost.
+          if (!(Test-Path $checks[1].Path)) {
+            $checks[1].Path = Join-Path $boost 'include\boost\config.hpp'
+          }
+          foreach ($item in $checks) {
+            if (!(Test-Path $item.Path)) {
+              throw "$($item.Name) dependency not found: $($item.Path). Provision a v140-compatible x64 build on the runner."
+            }
+          }
+          "VS2015_VCVARS=$vcvars" >> $env:GITHUB_ENV
+          "VS2015_QT=$qt" >> $env:GITHUB_ENV
+          "VS2015_BOOST=$boost" >> $env:GITHUB_ENV
+          "VS2015_ICU=$icu" >> $env:GITHUB_ENV
+          "vs=$vs`nqt=$qt`nboost=$boost`nicu=$icu" | Set-Content prerequisite-paths.txt
+
+      - name: Check build utilities and MSVC compiler
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Use an x64 VS2015 environment in its own cmd process: avoids a
+          # later VS2022 compiler accidentally entering PATH.
+          $probe = 'call "{0}" amd64 >nul && where cl && cl /Bv && where link && link /? >nul' -f $env:VS2015_VCVARS
+          & cmd.exe /d /s /c $probe 2>&1 | Tee-Object -FilePath compiler-version.log
+          if ($LASTEXITCODE -ne 0) { throw 'Could not activate VS2015 x64 compiler environment.' }
+          $cmake = Get-Command cmake -ErrorAction SilentlyContinue
+          if (-not $cmake) { throw 'CMake is required on the self-hosted runner (recommended: CMake 3.31.x).' }
+          $ver = (cmake --version | Select-Object -First 1)
+          Write-Host $ver
+          # Keep a CMake 3.x release to avoid VS2015 generator removal.
+          if ($ver -match 'cmake version (\d+)\.') {
+            if ([int]$matches[1] -ge 4) { throw 'Use CMake 3.31.x for VS2015 compatibility.' }
+          }
+          foreach ($name in @('git','perl','msgfmt','msgmerge','xgettext','xsltproc','sed','diff','cat','bison','flex','procdump64.exe')) {
+            if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+              throw "Missing required build/diagnostic tool '$name'. Install it on the self-hosted runner and expose it on PATH."
+            }
+          }
+          # The Windows SDK provides message compiler and MIDL.
+          foreach ($name in @('mc.exe','midl.exe','mt.exe','rc.exe')) {
+            if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+              Write-Warning "$name not on PATH; ensure VS2015/Windows SDK is correctly installed before configuring."
+            }
+          }
+
+      - name: Configure MiKTeX using VS2015 v140 x64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $paths = @($env:VS2015_QT, $env:VS2015_ICU)
+          $boostRoot = $env:VS2015_BOOST
+          $boostIncludes = if (Test-Path (Join-Path $boostRoot 'include\boost')) { Join-Path $boostRoot 'include' } else { $boostRoot }
+          $boostLib = if (Test-Path (Join-Path $boostRoot 'lib64-msvc-14.0')) {
+            Join-Path $boostRoot 'lib64-msvc-14.0'
+          } elseif (Test-Path (Join-Path $boostRoot 'lib')) {
+            Join-Path $boostRoot 'lib'
+          } else { throw "Boost library directory not found under $boostRoot" }
+          # No /arch:AVX2, /GL, /LTCG, or compiler optimizations.
+          # /Zi and /DEBUG:FULL preserve debugging information for matched PDBs.
+          $args = @(
+            '-S', '.', '-B', 'build-vs2015',
+            '-G', 'Visual Studio 14 2015', '-A', 'x64',
+            '-DCMAKE_CONFIGURATION_TYPES=Release',
+            '-DWITH_MIKTEX_API_DOC=OFF',
+            '-DWITH_MIKTEX_DOC=OFF',
+            '-DWITH_UI_MFC=OFF',
+            "-DCMAKE_PREFIX_PATH=$($paths -join ';')",
+            "-DBOOST_ROOT=$boostRoot",
+            "-DBoost_ROOT=$boostRoot",
+            "-DBoost_INCLUDE_DIR=$boostIncludes",
+            "-DBOOST_LIBRARYDIR=$boostLib",
+            '-DBoost_USE_STATIC_RUNTIME=ON',
+            "-DICU_ROOT=$env:VS2015_ICU",
+            "-DICU_INCLUDE_DIR=$(Join-Path $env:VS2015_ICU 'include')",
+            '-DCMAKE_C_FLAGS_RELEASE=/Od /Ob0 /Zi /DNDEBUG',
+            '-DCMAKE_CXX_FLAGS_RELEASE=/Od /Ob0 /Zi /DNDEBUG',
+            '-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/DEBUG:FULL',
+            '-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/DEBUG:FULL'
+          )
+          & cmake @args 2>&1 | Tee-Object -FilePath configure.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build fc-case using VS2015
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binlog = Join-Path $env:GITHUB_WORKSPACE 'fontconfig-vs2015.binlog'
+          & cmake --build build-vs2015 --config Release --target fc-case --parallel 2 -- /v:minimal "/bl:$binlog" 2>&1 |
+            Tee-Object -FilePath fontconfig-vs2015.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Execute fc-case under ProcDump using original inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $source = Join-Path $root 'Libraries\3rd\fontconfig\source\fc-case'
+          $exe = Join-Path $root 'build-vs2015\sandbox\miktex\bin\x64\fc-case.exe'
+          $caseFile = Join-Path $source 'CaseFolding.txt'
+          $template = Join-Path $source 'fccase.tmpl.h'
+          foreach ($p in @($exe, $caseFile, $template)) {
+            if (-not (Test-Path -LiteralPath $p)) { throw "Input/executable missing: $p" }
+          }
+          $dumpDir = Join-Path $root 'crash-dumps'
+          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+          $p = (Get-Command procdump64.exe).Source
+          $out = Join-Path $root 'fc-case-procdump.log'
+          $err = Join-Path $root 'fc-case-stderr.log'
+          # ProcDump itself launches fc-case; the batch shell supplies the
+          # header template through stdin. stdout contains ProcDump messages.
+          $command = '"{0}" -accepteula -ma -e -t -x "{1}" "{2}" "{3}" < "{4}" > "{5}" 2> "{6}"' -f `
+            $p, $dumpDir, $exe, $caseFile, $template, $out, $err
+          @('@echo off', $command, 'exit /b %errorlevel%') |
+            Set-Content -Path run-fc-case-vs2015.cmd -Encoding ascii
+          & cmd.exe /d /c (Join-Path $root 'run-fc-case-vs2015.cmd')
+          $code = $LASTEXITCODE
+          Write-Host "ProcDump exit code: $code"
+          if (Test-Path $out) { Get-Content $out -Tail 100 }
+          if (Test-Path $err) { Get-Content $err -Tail 100 }
+          if ($code -ne 0) { exit 1 }
+
+      - name: Optional full MiKTeX build
+        if: ${{ inputs.full_build }}
+        run: |
+          $binlog = Join-Path $env:GITHUB_WORKSPACE 'full-vs2015.binlog'
+          & cmake --build build-vs2015 --config Release --parallel 2 -- /v:minimal "/bl:$binlog" 2>&1 |
+            Tee-Object -FilePath full-vs2015.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect matching binaries and PDBs
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force -Path debug-symbols | Out-Null
+          if (Test-Path 'build-vs2015') {
+            Get-ChildItem build-vs2015 -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -in @('.pdb','.exe','.dll') -and (
+                  $_.Name -eq 'fc-case.exe' -or
+                  $_.Name -eq 'fc-case.pdb' -or
+                  $_.Name -like 'MiKTeX260500-*.pdb' -or
+                  $_.Name -like 'MiKTeX260500-*.dll'
+              ) } | ForEach-Object {
+                $relative = [IO.Path]::GetRelativePath((Resolve-Path build-vs2015).Path, $_.FullName)
+                $dest = Join-Path 'debug-symbols' $relative
+                New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+                Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+              }
+          }
+
+      - name: Upload VS2015 diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-vs2015-diagnostics
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            prerequisite-paths.txt
+            compiler-version.log
+            configure.log
+            fontconfig-vs2015.log
+            fontconfig-vs2015.binlog
+            full-vs2015.log
+            full-vs2015.binlog
+            fc-case-procdump.log
+            fc-case-stderr.log
+            run-fc-case-vs2015.cmd
+            debug-symbols/
+            crash-dumps/
+            build-vs2015/CMakeCache.txt
+            build-vs2015/CMakeFiles/CMakeConfigureLog.yaml
+            build-vs2015/CMakeFiles/CMakeError.log
