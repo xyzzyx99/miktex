@@ -1,4 +1,4 @@
-name: MiKTeX Windows x64 unoptimized (diagnostic)
+name: MiKTeX Windows x64 Debug (ProcDump)
 
 on:
   workflow_dispatch:
@@ -138,7 +138,7 @@ jobs:
           "BOOST_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
           "ICU_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
           
-      - name: Configure Release x64 without optimization
+      - name: Configure Debug x64 with symbols
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -149,22 +149,26 @@ jobs:
           if (-not (Test-Path $toolchain)) { throw "vcpkg toolchain not found: $toolchain" }
           Write-Host "Using toolchain: $toolchain"
 
-          # Disable MSVC compiler optimizations for this diagnostic build.
-          # Dependencies supplied by vcpkg may still be preoptimized.
+          # Disable MSVC compiler optimizations and generate PDBs for this Debug build.
+          # vcpkg x64-windows-static Debug libraries use the static Debug CRT (/MTd).
           # Construct arguments as separate strings to avoid PowerShell expansion/quoting errors.
           $cmakeArgs = @(
             '-S', '.'
             '-B', 'build'
             '-G', 'Visual Studio 17 2022'
             '-A', 'x64'
-            '-DCMAKE_CONFIGURATION_TYPES=Release'
+            '-DCMAKE_CONFIGURATION_TYPES=Debug'
             '-DWITH_MIKTEX_API_DOC=OFF'
             '-DWITH_MIKTEX_DOC=OFF'
             '-DWITH_UI_MFC=OFF'
             "-DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/stage"
             "-DCMAKE_PREFIX_PATH=${{ steps.qt.outputs.prefix }}"
-            '-DCMAKE_C_FLAGS_RELEASE=/Od /Ob0 /DNDEBUG'
-            '-DCMAKE_CXX_FLAGS_RELEASE=/Od /Ob0 /DNDEBUG'
+            '-DCMAKE_C_FLAGS_DEBUG=/Od /Ob0 /Zi /RTC1 /D_DEBUG'
+            '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Ob0 /Zi /RTC1 /D_DEBUG'
+            '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/DEBUG:FULL /INCREMENTAL:NO'
+            '-DCMAKE_SHARED_LINKER_FLAGS_DEBUG=/DEBUG:FULL /INCREMENTAL:NO'
+            '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW'
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug'
             "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
             '-DVCPKG_TARGET_TRIPLET=x64-windows-static'
             "-DBOOST_ROOT=$boostRoot"
@@ -224,7 +228,7 @@ jobs:
           $binlog = Join-Path $env:GITHUB_WORKSPACE 'fontconfig-build.binlog'
 
           # Capture the generator build even when it fails before the full build.
-          & cmake --build build --config Release --target fc-case --parallel 1 -- /v:minimal "/bl:$binlog" 2>&1 |
+          & cmake --build build --config Debug --target fc-case --parallel 1 -- /v:minimal "/bl:$binlog" 2>&1 |
             Tee-Object -FilePath $log
           $buildExitCode = $LASTEXITCODE
           if ($buildExitCode -ne 0) { exit $buildExitCode }
@@ -307,14 +311,14 @@ jobs:
             Get-ChildItem $dumpDir -Recurse -File | Select-Object FullName, Length
           }
 
-      - name: Build Release
+      - name: Build Debug
         shell: pwsh
         run: |
           $log = Join-Path $env:GITHUB_WORKSPACE 'build.log'
           $binlog = Join-Path $env:GITHUB_WORKSPACE 'build.binlog'
 
           # Build all targets, not only the fontconfig header generator.
-          & cmake --build build --config Release --parallel 4 -- /v:minimal "/bl:$binlog" 2>&1 |
+          & cmake --build build --config Debug --parallel 4 -- /v:minimal "/bl:$binlog" 2>&1 |
             Tee-Object -FilePath $log
           $result = $LASTEXITCODE
           if ($result -ne 0) { exit $result }
@@ -322,8 +326,10 @@ jobs:
       - name: Stage executables (not an installer)
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/bin | Out-Null
-          $bins = Get-ChildItem build -Recurse -File -Filter *.exe | Where-Object { $_.FullName -match '[\\/]Release[\\/]' }
-          if (-not $bins) { throw 'No Release .exe files found; inspect build layout.' }
+          $bins = @(Get-ChildItem build -Recurse -File -Filter *.exe | Where-Object {
+            $_.FullName -match '[\\/]Debug[\\/]' -or $_.Name -eq 'fc-case.exe'
+          })
+          if (-not $bins) { throw 'No Debug .exe files found; inspect build layout.' }
           foreach ($f in $bins) {
             # Flattening names can collide; retain relative path under build.
             $relative = [IO.Path]::GetRelativePath((Resolve-Path build).Path, $f.FullName)
@@ -332,7 +338,7 @@ jobs:
             Copy-Item -LiteralPath $f.FullName -Destination $dest
           }
           @'
-          Experimental MiKTeX Windows x64 unoptimized diagnostic build artifact.
+          Experimental MiKTeX Windows x64 Debug build artifact with PDB symbols.
           Not a self-contained distribution or installer.
           Built executables may need DLLs, data, and configuration files.
           '@ | Set-Content artifacts/README.txt
@@ -340,16 +346,46 @@ jobs:
       - name: Upload compiled binaries
         uses: actions/upload-artifact@v4
         with:
-          name: miktex-windows-x64-unoptimized-build
+          name: miktex-windows-x64-debug-build
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Collect matching Debug executables and PDBs
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE 'build'
+          $destRoot = Join-Path $env:GITHUB_WORKSPACE 'debug-symbols'
+          New-Item -ItemType Directory -Force -Path $destRoot | Out-Null
+          if (-not (Test-Path $sourceRoot)) {
+            Write-Warning 'Build directory does not exist; no symbols to collect.'
+            return
+          }
+
+          # Preserve relative paths and matching binaries so WinDbg can locate them.
+          # Include all PDBs, plus fc-case and its MiKTeX DLL dependencies.
+          $files = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Extension -eq '.pdb' -or
+              $_.Name -eq 'fc-case.exe' -or
+              ($_.Extension -eq '.dll' -and $_.Name -like 'MiKTeX*')
+            })
+          foreach ($file in $files) {
+            $relative = [IO.Path]::GetRelativePath($sourceRoot, $file.FullName)
+            $target = Join-Path $destRoot $relative
+            New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+            Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+          }
+          Write-Host "Collected $($files.Count) debug binaries and symbol files."
+          $files | Select-Object FullName, Length | Format-Table -AutoSize
 
       - name: Upload build diagnostics (even on failure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: miktex-unoptimized-diagnostics
+          name: miktex-debug-diagnostics
           path: |
             build.log
             build.binlog
@@ -365,5 +401,6 @@ jobs:
             run-fc-case-procdump.cmd
             crash-dumps/
             crash-events.log
+            debug-symbols/
           if-no-files-found: warn
           retention-days: 14
