@@ -74,16 +74,12 @@ if(MIKTEX_NATIVE_WINDOWS)
     )
 endif()
 
-add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fccase.h
-    COMMAND $<TARGET_FILE:fc-case> ${fqsrcdir}/fc-case/CaseFolding.txt
-        < ${fqsrcdir}/fc-case/fccase.tmpl.h
-        > ${CMAKE_CURRENT_BINARY_DIR}/fccase.h
-    MAIN_DEPENDENCY source/fc-case/CaseFolding.txt
-    DEPENDS
-        fc-case
-        source/fc-case/fccase.tmpl.h
-    VERBATIM
+# Temporary workaround: use the pre-generated Fontconfig case tables.
+# Avoid executing fc-case during the build, which currently fails on Windows.
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/source/fc-case/fccase.h
+    ${CMAKE_CURRENT_BINARY_DIR}/fccase.h
+    COPYONLY
 )
 
 add_custom_target(gen-fccase-header ALL
