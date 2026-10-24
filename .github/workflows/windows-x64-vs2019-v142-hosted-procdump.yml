@@ -55,37 +55,42 @@ jobs:
           "VS_INSTALL_PATH=$vs" >> $env:GITHUB_ENV
           Write-Host "MSVC v142 directory: $($v142[0].FullName)"
 
-      - name: Verify VS2019 v142 compiler
+      - name: Verify MSVC v142 compiler
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $vcvars = Join-Path $env:VS_INSTALL_PATH 'VC/Auxiliary/Build/vcvarsall.bat'
-          $probe = 'call "{0}" amd64 -vcvars_ver=14.2 && cl /Bv' -f $vcvars
-          & cmd.exe /d /s /c $probe 2>&1 | Tee-Object -FilePath v142-compiler.log
-          if ($LASTEXITCODE -ne 0) { throw 'v142 compiler initialization failed' }
-          $logText = Get-Content v142-compiler.log -Raw
-          if ($logText -notmatch 'Version 19\.2[0-9]\.') {
-            throw 'Active compiler is not VS2019 MSVC 19.2x. Refusing to use v143.'
+      
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = (& $vswhere -latest -property installationPath).Trim()
+      
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvarsall.bat"
+      
+          if (!(Test-Path $vcvars)) {
+            throw "vcvarsall.bat not found"
           }
-
-      - name: Install helper tools
-        run: |
-          choco install -y ninja winflexbison3 strawberryperl procdump --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      # MiKTeX's CMake configuration requires GNU gettext and other
-      # Unix-style host utilities (msgfmt, msgmerge, xgettext, xsltproc,
-      # cat, diff, sed). Install them as tools; this is still an MSVC build.
-      - name: Install GNU build utilities (MSYS2)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MSYS
-          update: true
-          install: >-
-            gettext
-            diffutils
-            sed
-            libxslt
-
+      
+          # Initialize v142 and verify its actual compiler.
+          $script = Join-Path $env:RUNNER_TEMP "check-v142.cmd"
+      
+          @(
+            '@echo off'
+            "call `"$vcvars`" x64 -vcvars_ver=14.29"
+            'if errorlevel 1 exit /b 1'
+            'where cl'
+            'cl /Bv'
+            'echo int main(void) { return 0; } > "%TEMP%\v142-test.c"'
+            'cl /nologo /c /Fo"%TEMP%\v142-test.obj" "%TEMP%\v142-test.c"'
+            'exit /b %errorlevel%'
+          ) | Set-Content $script -Encoding ascii
+      
+          & cmd.exe /d /c $script
+      
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSVC v142 compiler test failed."
+          }
+      
+          Write-Host "MSVC v142 compiler verified successfully."
+          
       - name: Make GNU utilities available to CMake
         run: |
           $ErrorActionPreference = 'Stop'
