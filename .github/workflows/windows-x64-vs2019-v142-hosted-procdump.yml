@@ -55,6 +55,47 @@ jobs:
           "VS_INSTALL_PATH=$vs" >> $env:GITHUB_ENV
           Write-Host "MSVC v142 directory: $($v142[0].FullName)"
 
+      # Install the ATL package matching MSVC v142 (14.29), not v143 ATL.
+      # Verified component ID from Microsoft VS2022 Enterprise component catalog.
+      - name: Ensure MSVC v142 ATL is installed
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = $env:VS_INSTALL_PATH
+          if (-not $vs) { throw 'VS_INSTALL_PATH is not set' }
+          $atlInclude = Join-Path $vs 'VC/Tools/MSVC/14.29.30133/atlmfc/include/atlbase.h'
+          $atlLib = Join-Path $vs 'VC/Tools/MSVC/14.29.30133/atlmfc/lib/x64'
+          $component = 'Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL'
+          if (-not (Test-Path -LiteralPath $atlInclude)) {
+            $setup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/setup.exe'
+            if (-not (Test-Path $setup)) { throw "Visual Studio installer missing: $setup" }
+            Write-Host "Installing $component into $vs"
+            & $setup modify --installPath $vs --add $component --quiet --norestart --wait 2>&1 |
+              Tee-Object -FilePath 'v142-atl-install.log'
+            $setupExit = $LASTEXITCODE
+            if ($setupExit -notin @(0, 3010)) {
+              throw "ATL installation failed with exit code $setupExit"
+            }
+          } else {
+            'ATL already installed.' | Set-Content 'v142-atl-install.log'
+          }
+          # The v142 toolset version on the runner was 14.29.30133.
+          # Search other 14.29.* directories as a precaution if it changes.
+          $atlHeaders = @(Get-ChildItem (Join-Path $vs 'VC/Tools/MSVC') -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '14.29.*' } |
+            ForEach-Object { Join-Path $_.FullName 'atlmfc/include/atlbase.h' } |
+            Where-Object { Test-Path -LiteralPath $_ })
+          if ($atlHeaders.Count -eq 0) {
+            throw 'ATL installation finished, but no matching v142 atlbase.h was found.'
+          }
+          $foundHeader = $atlHeaders[0]
+          $foundAtlLib = Join-Path (Split-Path (Split-Path (Split-Path $foundHeader -Parent) -Parent) -Parent) 'atlmfc/lib/x64'
+          if (-not (Test-Path -LiteralPath $foundAtlLib)) {
+            throw "v142 ATL x64 library directory not found: $foundAtlLib"
+          }
+          Write-Host "v142 ATL header: $foundHeader"
+          Write-Host "v142 ATL libraries: $foundAtlLib"
+          Get-ChildItem -LiteralPath $foundAtlLib -Filter '*.lib' | Select-Object -First 10 Name
+
       - name: Verify VS2019 v142 compiler
         run: |
           $ErrorActionPreference = 'Stop'
@@ -455,6 +496,7 @@ jobs:
           name: miktex-v142-diagnostics
           path: |
             v142-compiler.log
+            v142-atl-install.log
             build.log
             build.binlog
             fontconfig-build.log
