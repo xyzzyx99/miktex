@@ -1,4 +1,4 @@
-name: MiKTeX Windows x64 optimized (experimental)
+name: MiKTeX Windows x64 no optimization (experimental)
 
 on:
   workflow_dispatch:
