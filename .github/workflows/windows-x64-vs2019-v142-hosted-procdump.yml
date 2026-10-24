@@ -69,7 +69,7 @@ jobs:
             $setup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/setup.exe'
             if (-not (Test-Path $setup)) { throw "Visual Studio installer missing: $setup" }
             Write-Host "Installing $component into $vs"
-            & $setup modify --installPath $vs --add $component --quiet --norestart --wait 2>&1 |
+            & $setup modify --installPath $vs --add $component --quiet --norestart 2>&1 |
               Tee-Object -FilePath 'v142-atl-install.log'
             $setupExit = $LASTEXITCODE
             if ($setupExit -notin @(0, 3010)) {
