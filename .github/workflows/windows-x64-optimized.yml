@@ -179,6 +179,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Enable crash dumps for MiKTeX build tools
+        if: ${{ false }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -197,6 +198,7 @@ jobs:
           }
 
       - name: Verify crash dump configuration
+        if: ${{ false }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -215,6 +217,7 @@ jobs:
           Get-ChildItem -LiteralPath $dumpDir -Force | Select-Object Name, Length
 
       - name: Diagnose Fontconfig generator
+        if: ${{ false }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -276,7 +279,8 @@ jobs:
           if ($result -ne 0) { exit 1 }
 
       - name: Collect crash event details
-        if: always()
+        if: ${{ false }}
+#        if: always()
         shell: pwsh
         run: |
           $log = Join-Path $env:GITHUB_WORKSPACE 'crash-events.log'
