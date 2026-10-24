@@ -45,6 +45,35 @@ jobs:
           "VS_INSTALL_PATH=$vs" >> $env:GITHUB_ENV
           Write-Host 'Requested MSVC v140 (Visual Studio 2015) toolset.'
 
+      - name: Verify VS2015 compiler installation
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $vs = $vs.Trim()
+      
+          Write-Host "Visual Studio: $vs"
+      
+          $v140 = Join-Path $vs 'VC\Tools\MSVC'
+          if (Test-Path $v140) {
+            Get-ChildItem $v140 -Directory |
+              Select-Object FullName
+          }
+      
+          $legacy = Join-Path $vs 'VC\bin\amd64\cl.exe'
+          Write-Host "Legacy v140 compiler exists: $(Test-Path $legacy)"
+      
+          $v140Files = @(
+            Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio" `
+              -Recurse -Filter vcvars140.bat -ErrorAction SilentlyContinue
+          )
+      
+          $v140Files | Select-Object FullName
+      
+          if ($v140Files.Count -eq 0 -and !(Test-Path $legacy)) {
+            throw "VS2015 v140 toolset is not installed."
+          }
+
       - name: Verify 2015 compiler availability
         run: |
           $ErrorActionPreference = 'Stop'
