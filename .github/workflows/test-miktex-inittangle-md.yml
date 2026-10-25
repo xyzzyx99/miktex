@@ -325,16 +325,30 @@ jobs:
           if ($rc -ne 0) { throw "inittangle build failed: $rc" }
           $exe = 'build-md/sandbox/miktex/bin/x64/inittangle.exe'
           if (-not (Test-Path $exe)) { throw "Missing $exe" }
+          # Diagnostic only: use any available x64 dumpbin, regardless of its
+          # toolset version. Its absence must NOT block the actual CRT test.
+          $dumpbin = $null
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $vs = (& $vswhere -latest -products '*' -property installationPath).Trim()
-          if (-not $vs) { throw 'Visual Studio installation not found for dumpbin' }
-          $dumpbin = Get-ChildItem (Join-Path $vs 'VC/Tools/MSVC') -Filter dumpbin.exe -Recurse -File |
-            Where-Object { $_.FullName -match 'Hostx64\x64\dumpbin.exe$' -and $_.FullName -match '14\.29\.' } |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $dumpbin) { throw 'v142 x64 dumpbin.exe not found' }
-          Write-Host "Using dumpbin: $dumpbin"
-          & $dumpbin /dependents $exe | Tee-Object 'crt-md-diagnostics/inittangle-dependents.txt'
-          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed: $LASTEXITCODE" }
+          if (Test-Path $vswhere) {
+            $vs = & $vswhere -latest -products '*' -property installationPath
+            if ($vs) {
+              $root = Join-Path ($vs | Select-Object -First 1) 'VC/Tools/MSVC'
+              if (Test-Path $root) {
+                $dumpbin = Get-ChildItem $root -Filter dumpbin.exe -Recurse -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -like '*Hostx64*x64*dumpbin.exe' } |
+                  Select-Object -First 1 -ExpandProperty FullName
+              }
+            }
+          }
+          if ($dumpbin) {
+            Write-Host "Using dumpbin: $dumpbin"
+            & $dumpbin /dependents $exe | Tee-Object 'crt-md-diagnostics/inittangle-dependents.txt'
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "dumpbin exited with $LASTEXITCODE; continuing the actual generation test."
+            }
+          } else {
+            Write-Warning 'dumpbin.exe unavailable; skipping optional dependency inspection.'
+          }
 
       - name: Run tangle.p and tangle.pool generation
         shell: pwsh
