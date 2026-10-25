@@ -1,0 +1,39 @@
+name: Linux SSH Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Enable SSH access
+        uses: owenthereal/action-upterm@v2
+        with:
+          limit-access-to-actor: true
+          detached: true
+
+      - name: Show system information
+        run: |
+          uname -a
+          whoami
+          pwd
+          free -h
+          df -h
+
+      - name: Example build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++
+          cmake --version
+          g++ --version
+
+      - name: Keep runner available for debugging
+        run: |
+          echo "SSH session is available while this step runs."
+          sleep 1800
