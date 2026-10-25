@@ -1,0 +1,36 @@
+name: Test Upterm SSH (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      wait_minutes:
+        description: 'Minutes to wait for the first SSH connection (0 = unlimited in attached mode)'
+        required: true
+        default: '30'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ssh-test:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Display runner information
+        shell: pwsh
+        run: |
+          Write-Host "Computer: $env:COMPUTERNAME"
+          Write-Host "User: $env:USERNAME"
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+
+      - name: Open SSH session (Upterm)
+        uses: owenthereal/action-upterm@v2
+        with:
+          limit-access-to-actor: true
+          wait-timeout-minutes: ${{ inputs.wait_minutes }}
+
+      - name: SSH session finished
+        shell: pwsh
+        run: Write-Host 'Upterm session ended; workflow resumed.'
