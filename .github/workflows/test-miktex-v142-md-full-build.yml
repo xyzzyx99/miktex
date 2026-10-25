@@ -1,4 +1,4 @@
-name: MiKTeX v142 MD CRT full build (serial)
+name: MiKTeX v142 MD CRT build and release validation
 
 on:
   workflow_dispatch:
@@ -419,6 +419,112 @@ jobs:
               Tee-Object 'crt-md-diagnostics/executables.txt'
           }
 
+      # Run after a successful build; record failures without discarding outputs.
+      # Some MiKTeX tests require an installed/configured TeX environment.
+      - name: Run CTest suite
+        if: success()
+        continue-on-error: true
+        timeout-minutes: 45
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ctest --test-dir build-md -C Release --output-on-failure --parallel 2 *> 'crt-md-diagnostics/ctest.log'
+          $rc = $LASTEXITCODE
+          Get-Content 'crt-md-diagnostics/ctest.log' -Tail 100
+          "CTest exit code: $rc" | Tee-Object 'crt-md-diagnostics/ctest-status.txt'
+          if ($rc -ne 0) { throw "CTest exited with $rc (non-blocking validation)" }
+
+      - name: Smoke test built executables
+        if: success() || failure()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $bin = Join-Path $env:GITHUB_WORKSPACE 'build-md/sandbox/miktex/bin/x64'
+          if (-not (Test-Path $bin)) { throw "Missing binary directory: $bin" }
+          $env:PATH = "$bin;$env:PATH"
+          $names = @('miktex.exe', 'miktex-tex.exe', 'miktex-pdftex.exe', 'miktex-xetex.exe', 'miktex-tangle.exe', 'miktex-ctangle.exe', 'miktex-texworks.exe')
+          $results = foreach ($name in $names) {
+            $file = Join-Path $bin $name
+            if (-not (Test-Path $file)) {
+              "NOT BUILT: $name"
+              continue
+            }
+            "===== $name --version ====="
+            & $file --version 2>&1 | Select-Object -First 20 | Out-String
+            "Exit code: $LASTEXITCODE"
+          }
+          $results | Set-Content 'crt-md-diagnostics/smoke-tests.txt'
+          Get-Content 'crt-md-diagnostics/smoke-tests.txt'
+
+      # A sandbox is not necessarily a complete, relocatable installation.
+      # Attempt staged installation using existing install rules (if defined).
+      - name: Try staged installation
+        if: success() || failure()
+        continue-on-error: true
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'stage'
+          & cmake --install build-md --config Release --prefix "$stage" *> 'crt-md-diagnostics/install.log'
+          $rc = $LASTEXITCODE
+          "Install exit code: $rc" | Tee-Object 'crt-md-diagnostics/install-status.txt'
+          Get-Content 'crt-md-diagnostics/install.log' -Tail 70
+          if ($rc -ne 0) { throw "Install step exited with $rc (non-blocking validation)" }
+
+      # CPack is optional and is attempted only when MiKTeX generated its config.
+      - name: Try CPack distribution
+        if: success() || failure()
+        continue-on-error: true
+        timeout-minutes: 50
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Path release-packages -Force | Out-Null
+          $config = 'build-md/CPackConfig.cmake'
+          if (-not (Test-Path $config)) {
+            'CPackConfig.cmake absent; no generic CPack package defined.' |
+              Tee-Object 'crt-md-diagnostics/cpack-status.txt'
+            exit 0
+          }
+          & cpack --config $config -C Release -B release-packages *> 'crt-md-diagnostics/cpack.log'
+          $rc = $LASTEXITCODE
+          "CPack exit code: $rc" | Tee-Object 'crt-md-diagnostics/cpack-status.txt'
+          Get-Content 'crt-md-diagnostics/cpack.log' -Tail 70
+          if ($rc -ne 0) { throw "CPack exited with $rc (non-blocking validation)" }
+
+      - name: Upload Windows x64 runtime binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-v142-md-windows-x64-binaries
+          path: |
+            build-md/sandbox/miktex/bin/x64/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 1
+
+      - name: Upload staged installation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-v142-md-install-stage
+          path: stage/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 1
+
+      - name: Upload distribution packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-v142-md-distribution-packages
+          path: release-packages/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 0
+
       - name: Upload full build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -431,3 +537,4 @@ jobs:
             v142-compiler.log
             v142-atl-install.log
           if-no-files-found: warn
+          retention-days: 30
