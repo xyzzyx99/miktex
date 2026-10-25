@@ -325,7 +325,16 @@ jobs:
           if ($rc -ne 0) { throw "inittangle build failed: $rc" }
           $exe = 'build-md/sandbox/miktex/bin/x64/inittangle.exe'
           if (-not (Test-Path $exe)) { throw "Missing $exe" }
-          & dumpbin /dependents $exe | Tee-Object 'crt-md-diagnostics/inittangle-dependents.txt'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = (& $vswhere -latest -products '*' -property installationPath).Trim()
+          if (-not $vs) { throw 'Visual Studio installation not found for dumpbin' }
+          $dumpbin = Get-ChildItem (Join-Path $vs 'VC/Tools/MSVC') -Filter dumpbin.exe -Recurse -File |
+            Where-Object { $_.FullName -match 'Hostx64\x64\dumpbin.exe$' -and $_.FullName -match '14\.29\.' } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) { throw 'v142 x64 dumpbin.exe not found' }
+          Write-Host "Using dumpbin: $dumpbin"
+          & $dumpbin /dependents $exe | Tee-Object 'crt-md-diagnostics/inittangle-dependents.txt'
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed: $LASTEXITCODE" }
 
       - name: Run tangle.p and tangle.pool generation
         shell: pwsh
