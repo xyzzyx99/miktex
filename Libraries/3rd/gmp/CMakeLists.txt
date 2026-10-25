@@ -262,6 +262,9 @@ set(mpn_sources
     ${fqsrcdir}/mpn/generic/matrix22_mul.c
     ${fqsrcdir}/mpn/generic/matrix22_mul1_inverse_vector.c
     ${fqsrcdir}/mpn/generic/mod_1.c
+    ${fqsrcdir}/mpn/generic/mod_1_1.c
+    ${fqsrcdir}/mpn/generic/mod_1_2.c
+    ${fqsrcdir}/mpn/generic/mod_1_4.c
     ${fqsrcdir}/mpn/generic/mu_bdiv_q.c
     ${fqsrcdir}/mpn/generic/mu_div_q.c
     ${fqsrcdir}/mpn/generic/mu_div_qr.c
