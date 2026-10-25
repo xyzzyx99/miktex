@@ -368,7 +368,7 @@ jobs:
         uses: owenthereal/action-upterm@v2
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: 10
+          wait-timeout-minutes: 60
 
       - name: Diagnose Fontconfig generator
         shell: pwsh
