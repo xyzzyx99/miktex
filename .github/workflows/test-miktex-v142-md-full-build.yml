@@ -1,4 +1,4 @@
-name: MiKTeX v142 MD CRT full build
+name: MiKTeX v142 MD CRT full build (serial)
 
 on:
   workflow_dispatch:
@@ -372,7 +372,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          & cmake --build build-md --config Release --target fc-case --parallel 2 -- /v:minimal 2>&1 |
+          & cmake --build build-md --config Release --target fc-case --parallel 1 -- /v:minimal 2>&1 |
             Tee-Object 'crt-md-diagnostics/fc-case-build.log'
           $rc = $LASTEXITCODE
           if ($rc -ne 0) { throw "fc-case failed: $rc" }
@@ -381,7 +381,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          & cmake --build build-md --config Release --target fc-lang --parallel 2 -- /v:minimal 2>&1 |
+          & cmake --build build-md --config Release --target fc-lang --parallel 1 -- /v:minimal 2>&1 |
             Tee-Object 'crt-md-diagnostics/fc-lang-build.log'
           $rc = $LASTEXITCODE
           if ($rc -ne 0) { throw "fc-lang failed: $rc" }
@@ -390,7 +390,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          & cmake --build build-md --config Release --target miktex-ctangle --parallel 2 -- /v:minimal 2>&1 |
+          & cmake --build build-md --config Release --target miktex-ctangle --parallel 1 -- /v:minimal 2>&1 |
             Tee-Object 'crt-md-diagnostics/miktex-ctangle-build.log'
           $rc = $LASTEXITCODE
           if ($rc -ne 0) { throw "miktex-ctangle failed: $rc" }
@@ -400,7 +400,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # This is the CMake default/ALL_BUILD target, not just miktex-tangle.
-          & cmake --build build-md --config Release --parallel 4 -- /v:minimal 2>&1 |
+          & cmake --build build-md --config Release --parallel 1 -- /v:minimal 2>&1 |
             Tee-Object 'crt-md-diagnostics/full-build.log'
           $rc = $LASTEXITCODE
           Write-Host "Complete MiKTeX build exit code: $rc"
