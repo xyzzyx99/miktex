@@ -36,4 +36,4 @@ jobs:
       - name: Keep runner available for debugging
         run: |
           echo "SSH session is available while this step runs."
-          sleep 1800
+          sleep 18000

@@ -105,7 +105,7 @@ void showCommand(const mem::vector<string>& s)
 int setenv(const char *name, const char *value, bool overwrite) {
   assert(overwrite);
 #if defined(MIKTEX_WINDOWS)
-  putenv((std::string(name) + "=" + (value != nullptr ? value : "")).c_str());
+  return putenv((std::string(name) + "=" + (value != nullptr ? value : "")).c_str());
 #else
   return SetEnvironmentVariableA(name,value);
 #endif
