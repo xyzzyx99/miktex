@@ -291,10 +291,12 @@ jobs:
             '-DWITH_UI_MFC=OFF'
             "-DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/stage"
             "-DCMAKE_PREFIX_PATH=${{ steps.qt.outputs.prefix }}"
-            '-DCMAKE_C_FLAGS_RELEASE=/Od /Ob0 /Zi /DNDEBUG'
-            '-DCMAKE_CXX_FLAGS_RELEASE=/Od /Ob0 /Zi /DNDEBUG'
-            '-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/DEBUG:FULL'
-            '-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/DEBUG:FULL'
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL'
+            '-DCMAKE_C_FLAGS_RELEASE=/MD /O2 /Oi /GL /arch:AVX2 /DNDEBUG'
+            '-DCMAKE_CXX_FLAGS_RELEASE=/MD /O2 /Oi /GL /arch:AVX2 /DNDEBUG'
+            '-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
+            '-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
+            '-DCMAKE_MODULE_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
             "-DBISON_EXECUTABLE=$env:BISON_EXECUTABLE"
             "-DFLEX_EXECUTABLE=$env:FLEX_EXECUTABLE"
             "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
