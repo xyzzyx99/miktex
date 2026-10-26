@@ -112,9 +112,8 @@ jobs:
             "call `"$vcvars`" x64 -vcvars_ver=14.29"
             'if errorlevel 1 exit /b 1'
             'where cl'
-            'cl /Bv'
             'echo int main(void) { return 0; } > "%TEMP%\v142-test.c"'
-            'cl /nologo /c /Fo"%TEMP%\v142-test.obj" "%TEMP%\v142-test.c"'
+            'cl /nologo /Bv /c /Fo"%TEMP%\v142-test.obj" "%TEMP%\v142-test.c"'
             'exit /b %errorlevel%'
           ) | Set-Content -LiteralPath $script -Encoding ascii
           & cmd.exe /d /c $script 2>&1 | Tee-Object -FilePath v142-compiler.log
