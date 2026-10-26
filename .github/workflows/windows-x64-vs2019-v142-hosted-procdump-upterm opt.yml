@@ -265,6 +265,32 @@ jobs:
           "BOOST_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
           "ICU_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
           
+      # The CMake-generated .def export scan requires ordinary COFF objects.
+      # Patch only MPLib's DLL target; preserve upstream sources and all other flags.
+      - name: Apply MetaPost DLL export fix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = 'Programs/TeXAndFriends/mplib/CMakeLists.txt'
+          $content = [IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE $file))
+          $needle = 'set_property(TARGET ${metapost_dll_name} PROPERTY WINDOWS_EXPORT_ALL_SYMBOLS TRUE)'
+          $fix = @'
+          # CMake automatic DLL exports require COFF object files (not /GL bitcode).
+          if(MSVC)
+              set_property(TARGET ${metapost_dll_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+              target_compile_options(${metapost_dll_name} PRIVATE /GL-)
+          endif()
+          '@
+          if ($content.Contains('target_compile_options(${metapost_dll_name} PRIVATE /GL-)')) {
+            Write-Host 'MetaPost export fix already present.'
+          } elseif ($content.Contains($needle)) {
+            $content = $content.Replace($needle, "$needle`r`n`r`n$fix")
+            [IO.File]::WriteAllText((Join-Path $env:GITHUB_WORKSPACE $file), $content)
+            Write-Host "Patched $file"
+          } else {
+            throw "Could not find MetaPost DLL export declaration in $file"
+          }
+
       - name: Configure optimized x64 Release using VS2019 v142
         shell: pwsh
         run: |
@@ -315,6 +341,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Enable crash dumps for MiKTeX build tools
+        if: ${{ inputs.interactive_debug == true }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -333,6 +360,7 @@ jobs:
           }
 
       - name: Verify crash dump configuration
+        if: ${{ inputs.interactive_debug == true }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -353,8 +381,7 @@ jobs:
       # Build the diagnostic executable before opening an interactive shell.
       # This step runs only for manual launches with interactive_debug enabled.
       - name: Prepare fc-case for interactive debugging
-#        if: ${{ inputs.interactive_debug == true }}
-        if: always()
+        if: ${{ inputs.interactive_debug == true }}
         shell: pwsh
         run: |
           & cmake --build build --config Release --target fc-case --parallel 1
@@ -366,14 +393,14 @@ jobs:
       # Interactive MSYS2 shell on the same Windows hosted runner, only on request.
       # The session is restricted to the GitHub user who launched the workflow.
       - name: Interactive runner console (Upterm)
-#        if: ${{ inputs.interactive_debug == true }}
-        if: always()
+        if: ${{ inputs.interactive_debug == true }}
         uses: owenthereal/action-upterm@v2
         with:
           limit-access-to-actor: true
           wait-timeout-minutes: 60
 
       - name: Diagnose Fontconfig generator
+        if: ${{ inputs.interactive_debug == true }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -464,6 +491,25 @@ jobs:
             Get-ChildItem $dumpDir -Recurse -File | Select-Object FullName, Length
           }
 
+      # Compile the previously failing dependencies in isolation, serially.
+      - name: Build LuaTeX prerequisites and verify MetaPost exports
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($target in @('MiKTeX260500-lua53', 'MiKTeX260500-pixman', 'MiKTeX260500-metapost')) {
+            & cmake --build build --config Release --target $target --parallel 1
+            if ($LASTEXITCODE -ne 0) { throw "Failed to build $target" }
+          }
+          $dll = 'build/sandbox/miktex/bin/x64/MiKTeX260500-metapost.dll'
+          if (-not (Test-Path $dll)) { throw "Missing MetaPost DLL: $dll" }
+          $exports = & dumpbin /exports $dll
+          if ($LASTEXITCODE -ne 0 -or -not ($exports | Select-String '\bmp_initialize\b')) {
+            throw 'MetaPost DLL does not export mp_initialize.'
+          }
+          Write-Host 'Verified mp_initialize export in MetaPost DLL.'
+          & cmake --build build --config Release --target miktex-luatex --parallel 1
+          if ($LASTEXITCODE -ne 0) { throw 'LuaTeX target failed.' }
+
       - name: Build Release
         shell: pwsh
         run: |
@@ -493,31 +539,82 @@ jobs:
               }
           }
 
-      - name: Stage executables and runtime DLLs (not an installer)
+      # Attempt the project's own install rules to include TeX files and runtime
+      # layout. The development archive below is also independently staged.
+      - name: Install MiKTeX build tree
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $bin = 'build/sandbox/miktex/bin/x64'
-          if (-not (Test-Path -LiteralPath $bin -PathType Container)) {
-            throw "Missing MiKTeX binary directory: $bin"
-          }
-          $files = @(Get-ChildItem -LiteralPath $bin -File |
-            Where-Object { $_.Extension -in @('.exe', '.dll') })
-          if (@($files | Where-Object Extension -eq '.exe').Count -eq 0) {
-            throw "No MiKTeX executables found in $bin"
-          }
-          $dest = 'artifacts/bin'
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          foreach ($f in $files) {
-            Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $dest $f.Name) -Force
-          }
-          "Staged $(@($files | Where-Object Extension -eq '.exe').Count) EXEs and $(@($files | Where-Object Extension -eq '.dll').Count) DLLs"
-          @'
-          Experimental MiKTeX Windows x64 optimized build artifact (/MD, /O2, /Oi, AVX2).
-          Not a self-contained distribution or installer.
-          Programs may need TeX resources, configuration, and additional dependencies.
-          '@ | Set-Content artifacts/README.txt
+          & cmake --install build --config Release --prefix "$env:GITHUB_WORKSPACE/stage" 2>&1 |
+            Tee-Object -FilePath install.log
+          if ($LASTEXITCODE -ne 0) { throw 'MiKTeX install step failed.' }
 
-      - name: Upload compiled binaries
+      - name: Stage binaries, libraries, headers and installed resources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = $env:GITHUB_WORKSPACE
+          $out = Join-Path $workspace 'artifacts'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+          function Copy-TreeFile([string]$base, [string]$path, [string]$dest) {
+            $rel = [IO.Path]::GetRelativePath($base, $path)
+            $target = Join-Path $dest $rel
+            New-Item -ItemType Directory -Path (Split-Path $target) -Force | Out-Null
+            Copy-Item -LiteralPath $path -Destination $target -Force
+          }
+
+          $bin = Join-Path $workspace 'build/sandbox/miktex/bin/x64'
+          if (-not (Test-Path $bin)) { throw "Missing binary directory: $bin" }
+          $binaries = @(Get-ChildItem $bin -File | Where-Object Extension -In @('.exe','.dll'))
+          if (-not @($binaries | Where-Object Extension -eq '.exe').Count) { throw 'No executables produced' }
+          New-Item -ItemType Directory -Path "$out/bin" -Force | Out-Null
+          foreach ($f in $binaries) { Copy-Item $f.FullName "$out/bin/$($f.Name)" -Force }
+
+          # Both static libraries and DLL import libraries; keep directory paths
+          # because different libraries can have the same basename.
+          $buildRoot = Join-Path $workspace 'build'
+          $libs = @(Get-ChildItem $buildRoot -Recurse -File -Filter '*.lib')
+          foreach ($f in $libs) { Copy-TreeFile $buildRoot $f.FullName "$out/lib/build" }
+
+          # Preserve all existing source headers and generated build headers.
+          # Keep their original paths for correct relative includes.
+          $headerExtensions = @('.h','.hpp','.hxx','.hh','.inl','.inc')
+          $headerCount = 0
+          foreach ($rootRel in @('Libraries','Programs')) {
+            $sourceRoot = Join-Path $workspace $rootRel
+            if (-not (Test-Path $sourceRoot)) { continue }
+            Get-ChildItem $sourceRoot -Recurse -File | Where-Object {
+              $_.Extension -in $headerExtensions
+            } | ForEach-Object {
+              Copy-TreeFile $workspace $_.FullName "$out/include/source"
+              $headerCount++
+            }
+          }
+          Get-ChildItem $buildRoot -Recurse -File | Where-Object {
+            $_.Extension -in $headerExtensions -and $_.FullName -notmatch '[\/]CMakeFiles[\/]'
+          } | ForEach-Object {
+            Copy-TreeFile $buildRoot $_.FullName "$out/include/generated"
+            $headerCount++
+          }
+          if ($headerCount -eq 0 -or $libs.Count -eq 0) { throw 'Headers or libraries missing' }
+
+          # Preserve MiKTeX CMake installation including installed data files.
+          $stage = Join-Path $workspace 'stage'
+          if (-not (Test-Path $stage)) { throw 'Install directory is missing' }
+          Copy-Item -LiteralPath $stage -Destination "$out/installed" -Recurse -Force
+          @'
+          MiKTeX Windows x64 / v142 Release build; /MD /O2 /Oi /arch:AVX2.
+          bin/                    Compiled executables and runtime DLLs
+          lib/build/              Static libraries and import libraries (build-relative paths)
+          include/source/         Source headers (repository-relative paths)
+          include/generated/      Generated headers (build-relative paths)
+          installed/              CMake-installed resources and runtime layout
+          This archive is a build/development artifact, not a tested standalone installer.
+          '@ | Set-Content "$out/README.txt"
+          Write-Host "Staged $($binaries.Count) binaries, $($libs.Count) libraries, $headerCount headers."
+
+      - name: Upload complete compiled build
         uses: actions/upload-artifact@v4
         with:
           name: miktex-windows-x64-v142-build
@@ -534,6 +631,7 @@ jobs:
             v142-compiler.log
             v142-atl-install.log
             build.log
+            install.log
             build.binlog
             fontconfig-build.log
             fontconfig-build.binlog
