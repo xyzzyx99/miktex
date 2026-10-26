@@ -1,0 +1,548 @@
+name: MiKTeX Windows x64 VS2019 v142 action upterm opt (hosted diagnostic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      interactive_debug:
+        description: 'Open an SSH console after building fc-case.exe'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Build tool versions
+        run: |
+          cmake --version
+          git --version
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+
+      # Install v142 into the GitHub-hosted VS2022 instance, only if missing.
+      # Never fall back to v143: that would invalidate the compiler comparison.
+      - name: Ensure MSVC 2019 v142 toolset is installed
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = (& $vswhere -latest -products '*' -property installationPath).Trim()
+          if (-not $vs) { throw 'Visual Studio installation not found' }
+          $compilerRoot = Join-Path $vs 'VC/Tools/MSVC'
+          $v142 = @(Get-ChildItem $compilerRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '14.2*' -and (Test-Path (Join-Path $_.FullName 'bin/Hostx64/x64/cl.exe')) })
+          if ($v142.Count -eq 0) {
+            $setup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/setup.exe'
+            if (-not (Test-Path $setup)) { throw 'Visual Studio Installer setup.exe missing' }
+            & $setup modify --installPath $vs `
+              --add Microsoft.VisualStudio.ComponentGroup.VC.Tools.142.x86.x64 `
+              --quiet --norestart --wait
+            if ($LASTEXITCODE -notin @(0,3010)) { throw "VS Installer failed ($LASTEXITCODE)" }
+          }
+          $v142 = @(Get-ChildItem $compilerRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '14.2*' -and (Test-Path (Join-Path $_.FullName 'bin/Hostx64/x64/cl.exe')) } |
+            Sort-Object Name -Descending)
+          if ($v142.Count -eq 0) { throw 'MSVC v142 binaries absent even after installation.' }
+          "VS_INSTALL_PATH=$vs" >> $env:GITHUB_ENV
+          Write-Host "MSVC v142 directory: $($v142[0].FullName)"
+
+      # Install the ATL package matching MSVC v142 (14.29), not v143 ATL.
+      # Verified component ID from Microsoft VS2022 Enterprise component catalog.
+      - name: Ensure MSVC v142 ATL is installed
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = $env:VS_INSTALL_PATH
+          if (-not $vs) { throw 'VS_INSTALL_PATH is not set' }
+          $atlInclude = Join-Path $vs 'VC/Tools/MSVC/14.29.30133/atlmfc/include/atlbase.h'
+          $atlLib = Join-Path $vs 'VC/Tools/MSVC/14.29.30133/atlmfc/lib/x64'
+          $component = 'Microsoft.VisualStudio.Component.VC.14.29.16.11.ATL'
+          if (-not (Test-Path -LiteralPath $atlInclude)) {
+            $setup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/setup.exe'
+            if (-not (Test-Path $setup)) { throw "Visual Studio installer missing: $setup" }
+            Write-Host "Installing $component into $vs"
+            & $setup modify --installPath $vs --add $component --quiet --norestart 2>&1 |
+              Tee-Object -FilePath 'v142-atl-install.log'
+            $setupExit = $LASTEXITCODE
+            if ($setupExit -notin @(0, 3010)) {
+              throw "ATL installation failed with exit code $setupExit"
+            }
+          } else {
+            'ATL already installed.' | Set-Content 'v142-atl-install.log'
+          }
+          # The v142 toolset version on the runner was 14.29.30133.
+          # Search other 14.29.* directories as a precaution if it changes.
+          $atlHeaders = @(Get-ChildItem (Join-Path $vs 'VC/Tools/MSVC') -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '14.29.*' } |
+            ForEach-Object { Join-Path $_.FullName 'atlmfc/include/atlbase.h' } |
+            Where-Object { Test-Path -LiteralPath $_ })
+          if ($atlHeaders.Count -eq 0) {
+            throw 'ATL installation finished, but no matching v142 atlbase.h was found.'
+          }
+          $foundHeader = $atlHeaders[0]
+          $foundAtlLib = Join-Path (Split-Path (Split-Path (Split-Path $foundHeader -Parent) -Parent) -Parent) 'atlmfc/lib/x64'
+          if (-not (Test-Path -LiteralPath $foundAtlLib)) {
+            throw "v142 ATL x64 library directory not found: $foundAtlLib"
+          }
+          Write-Host "v142 ATL header: $foundHeader"
+          Write-Host "v142 ATL libraries: $foundAtlLib"
+          Get-ChildItem -LiteralPath $foundAtlLib -Filter '*.lib' | Select-Object -First 10 Name
+
+      - name: Verify VS2019 v142 compiler
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcvars = Join-Path $env:VS_INSTALL_PATH 'VC/Auxiliary/Build/vcvarsall.bat'
+          $script = Join-Path $env:RUNNER_TEMP 'verify-v142.cmd'
+          @(
+            '@echo off'
+            "call `"$vcvars`" x64 -vcvars_ver=14.29"
+            'if errorlevel 1 exit /b 1'
+            'where cl'
+            'cl /Bv'
+            'echo int main(void) { return 0; } > "%TEMP%\v142-test.c"'
+            'cl /nologo /c /Fo"%TEMP%\v142-test.obj" "%TEMP%\v142-test.c"'
+            'exit /b %errorlevel%'
+          ) | Set-Content -LiteralPath $script -Encoding ascii
+          & cmd.exe /d /c $script 2>&1 | Tee-Object -FilePath v142-compiler.log
+          if ($LASTEXITCODE -ne 0) { throw 'v142 compiler compilation test failed' }
+          $logText = Get-Content v142-compiler.log -Raw
+          if ($logText -notmatch 'Version 19\.2[0-9]\.') {
+            throw 'Active compiler is not VS2019 MSVC 19.2x. Refusing to use v143.'
+          }
+
+      - name: Install helper tools
+        run: |
+          choco install -y ninja winflexbison3 strawberryperl procdump --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Locate Flex and Bison
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:ChocolateyInstall 'lib\winflexbison3\tools'
+          if (-not (Test-Path $tools)) { throw "winflexbison3 tools directory missing: $tools" }
+          $bison = Get-ChildItem $tools -Recurse -File -Filter win_bison.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          $flex = Get-ChildItem $tools -Recurse -File -Filter win_flex.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $bison) { throw "win_bison.exe not found beneath $tools" }
+          if (-not $flex) { throw "win_flex.exe not found beneath $tools" }
+          & $bison --version
+          if ($LASTEXITCODE -ne 0) { throw 'Bison failed to execute' }
+          & $flex --version
+          if ($LASTEXITCODE -ne 0) { throw 'Flex failed to execute' }
+          "BISON_EXECUTABLE=$bison" >> $env:GITHUB_ENV
+          "FLEX_EXECUTABLE=$flex" >> $env:GITHUB_ENV
+          Write-Host "Bison: $bison"
+          Write-Host "Flex: $flex"
+
+      # MiKTeX's CMake configuration requires GNU gettext and other
+      # Unix-style host utilities (msgfmt, msgmerge, xgettext, xsltproc,
+      # cat, diff, sed). Install them as tools; this is still an MSVC build.
+      - name: Install GNU build utilities (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: >-
+            gettext
+            diffutils
+            sed
+            libxslt
+
+      - name: Make GNU utilities available to CMake
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msysBin = 'C:\msys64\usr\bin'
+          if (-not (Test-Path (Join-Path $msysBin 'msgfmt.exe'))) {
+            throw "msgfmt.exe not found in $msysBin; check MSYS2 setup"
+          }
+          # Persist for all subsequent steps, including CMake build rules.
+          $msysBin >> $env:GITHUB_PATH
+          $env:PATH = "$msysBin;$env:PATH"
+          foreach ($tool in @('msgfmt', 'msgmerge', 'xgettext', 'xsltproc', 'cat', 'diff', 'sed')) {
+            $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+            if (-not $cmd) { throw "Missing required MiKTeX build utility: $tool" }
+            Write-Host "$tool => $($cmd.Source)"
+          }
+          & (Join-Path $msysBin 'msgfmt.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Keep Qt identical to the VS2022 diagnostic build so that only
+      # the compiler version changes. The Qt MSVC2022 libraries are built
+      # with v143; mixing v142 and v143 is supported at the MSVC ABI level,
+      # but link/build compatibility still needs to be tested.
+      - name: Install Qt 6.8.3 (same as VS2022 baseline)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: 'qt5compat'
+          dir: '${{ github.workspace }}/Qt'
+          cache: true
+
+      - name: Locate Qt
+        id: qt
+        run: |
+          if (-not $env:QT_ROOT_DIR) { throw 'QT_ROOT_DIR is missing after Qt installation' }
+          $prefix = $env:QT_ROOT_DIR
+          "prefix=$prefix" >> $env:GITHUB_OUTPUT
+          Write-Host "Qt prefix: $prefix"
+
+      - name: Locate Windows Message Compiler
+        shell: pwsh
+        run: |
+          $sdkBin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+      
+          $mc = Get-ChildItem $sdkBin -Filter mc.exe -Recurse -File |
+            Where-Object { $_.DirectoryName -match '\\x64$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+      
+          if (-not $mc) {
+            throw "mc.exe not found in the Windows SDK"
+          }
+      
+          Write-Host "Found: $($mc.FullName)"
+      
+          $mc.DirectoryName | Out-File `
+            -FilePath $env:GITHUB_PATH `
+            -Append -Encoding utf8
+
+      - name: Install Boost.Locale and ICU (Windows x64, v142)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Force dependencies to use the same VS2019 toolset as MiKTeX.
+          $triplet = 'x64-windows-static-v142'
+          New-Item -ItemType Directory -Path 'triplets' -Force | Out-Null
+          @'
+          set(VCPKG_TARGET_ARCHITECTURE x64)
+          set(VCPKG_CRT_LINKAGE static)
+          set(VCPKG_LIBRARY_LINKAGE static)
+          set(VCPKG_PLATFORM_TOOLSET v142)
+          '@ | Set-Content 'triplets/x64-windows-static-v142.cmake' -Encoding ascii
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
+      
+          # Modern vcpkg ports may reject VS2019/v142; a failure here must be
+          # addressed by pinning compatible dependency versions, not mixing v143 libs.
+          & $vcpkg install "boost-locale:$triplet" "icu:$triplet" --classic --overlay-triplets="$env:GITHUB_WORKSPACE/triplets"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      
+          $root = Join-Path $vcpkgRoot "installed\$triplet"
+      
+          if (!(Test-Path "$root\include\boost\config.hpp")) {
+            throw "Boost headers not found"
+          }
+      
+          if (!(Test-Path "$root\include\unicode\utypes.h")) {
+            throw "ICU headers not found"
+          }
+      
+          Write-Host "Boost.Locale libraries:"
+          Get-ChildItem "$root\lib" -Filter "*boost_locale*.lib"
+      
+          Write-Host "ICU libraries:"
+          Get-ChildItem "$root\lib" -Filter "icu*.lib"
+      
+          $root = $root -replace '\\', '/'
+          "BOOST_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
+          "ICU_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
+          
+      - name: Configure x64 Release using VS2019 v142 without optimization
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) { throw 'VCPKG_INSTALLATION_ROOT is not set' }
+          $toolchain = Join-Path $vcpkgRoot 'scripts/buildsystems/vcpkg.cmake'
+          $boostRoot = Join-Path $vcpkgRoot 'installed/x64-windows-static-v142'
+          if (-not (Test-Path $toolchain)) { throw "vcpkg toolchain not found: $toolchain" }
+          Write-Host "Using toolchain: $toolchain"
+
+          # Disable MSVC compiler optimizations for this diagnostic build.
+          # Dependencies supplied by vcpkg may still be preoptimized.
+          # Construct arguments as separate strings to avoid PowerShell expansion/quoting errors.
+          $cmakeArgs = @(
+            '-S', '.'
+            '-B', 'build'
+            '-G', 'Visual Studio 17 2022'
+            '-T', 'v142'
+            '-A', 'x64'
+            '-DCMAKE_CONFIGURATION_TYPES=Release'
+            '-DWITH_MIKTEX_API_DOC=OFF'
+            '-DWITH_MIKTEX_DOC=OFF'
+            '-DWITH_UI_MFC=OFF'
+            "-DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/stage"
+            "-DCMAKE_PREFIX_PATH=${{ steps.qt.outputs.prefix }}"
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL'
+            '-DCMAKE_C_FLAGS_RELEASE=/MD /O2 /Oi /GL /arch:AVX2 /DNDEBUG'
+            '-DCMAKE_CXX_FLAGS_RELEASE=/MD /O2 /Oi /GL /arch:AVX2 /DNDEBUG'
+            '-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
+            '-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
+            '-DCMAKE_MODULE_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
+            "-DBISON_EXECUTABLE=$env:BISON_EXECUTABLE"
+            "-DFLEX_EXECUTABLE=$env:FLEX_EXECUTABLE"
+            "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
+            '-DVCPKG_TARGET_TRIPLET=x64-windows-static-v142'
+            "-DVCPKG_OVERLAY_TRIPLETS=$env:GITHUB_WORKSPACE/triplets"
+            "-DBOOST_ROOT=$boostRoot"
+            "-DBoost_ROOT=$boostRoot"
+            "-DBoost_INCLUDE_DIR=$(Join-Path $boostRoot 'include')"
+            "-DBOOST_LIBRARYDIR=$(Join-Path $boostRoot 'lib')"
+            '-DBoost_USE_STATIC_LIBS=ON'
+            '-DBoost_USE_STATIC_RUNTIME=ON'
+            "-DICU_ROOT=$env:ICU_INSTALL_ROOT"
+            "-DICU_INCLUDE_DIR=$env:ICU_INSTALL_ROOT/include"
+          )
+
+          & cmake @cmakeArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Enable crash dumps for MiKTeX build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
+          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+
+          # Windows Error Reporting LocalDumps; no administrator rights required.
+          # Full dumps can contain memory and potentially sensitive data.
+          foreach ($process in @('fc-case.exe', 'miktex-tangle.exe', 'miktex-ctangle.exe')) {
+            $key = "HKCU:\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\$process"
+            New-Item -Path $key -Force | Out-Null
+            New-ItemProperty -Path $key -Name DumpFolder -Value $dumpDir -PropertyType ExpandString -Force | Out-Null
+            New-ItemProperty -Path $key -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -Path $key -Name DumpCount -Value 5 -PropertyType DWord -Force | Out-Null
+            Write-Host "Configured full crash dumps for $process in $dumpDir"
+          }
+
+      - name: Verify crash dump configuration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
+          foreach ($process in @('fc-case.exe', 'miktex-tangle.exe', 'miktex-ctangle.exe')) {
+            $key = "HKCU:\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\$process"
+            Write-Host "Checking $key"
+            if (-not (Test-Path $key)) { throw "Missing WER registry key: $key" }
+            $settings = Get-ItemProperty -Path $key
+            $settings | Select-Object DumpFolder, DumpType, DumpCount | Format-List
+            if ($settings.DumpType -ne 2 -or $settings.DumpFolder -ne $dumpDir) {
+              throw "Incorrect WER dump settings for $process"
+            }
+          }
+          Write-Host "Dump directory: $dumpDir"
+          Get-ChildItem -LiteralPath $dumpDir -Force | Select-Object Name, Length
+
+      # Build the diagnostic executable before opening an interactive shell.
+      # This step runs only for manual launches with interactive_debug enabled.
+      - name: Prepare fc-case for interactive debugging
+#        if: ${{ inputs.interactive_debug == true }}
+        if: always()
+        shell: pwsh
+        run: |
+          & cmake --build build --config Release --target fc-case --parallel 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'build/sandbox/miktex/bin/x64/fc-case.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Missing fc-case executable: $exe" }
+          Write-Host "fc-case executable: $exe"
+
+      # Interactive MSYS2 shell on the same Windows hosted runner, only on request.
+      # The session is restricted to the GitHub user who launched the workflow.
+      - name: Interactive runner console (Upterm)
+#        if: ${{ inputs.interactive_debug == true }}
+        if: always()
+        uses: owenthereal/action-upterm@v2
+        with:
+          limit-access-to-actor: true
+          wait-timeout-minutes: 60
+
+      - name: Diagnose Fontconfig generator
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:GITHUB_WORKSPACE 'fontconfig-build.log'
+          $binlog = Join-Path $env:GITHUB_WORKSPACE 'fontconfig-build.binlog'
+
+          # Capture the generator build even when it fails before the full build.
+          & cmake --build build --config Release --target fc-case --parallel 1 -- /v:minimal "/bl:$binlog" 2>&1 |
+            Tee-Object -FilePath $log
+          $buildExitCode = $LASTEXITCODE
+          if ($buildExitCode -ne 0) { exit $buildExitCode }
+
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'build/sandbox/miktex/bin/x64/fc-case.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'Libraries/3rd/fontconfig/source/fc-case'
+          $output = Join-Path $env:GITHUB_WORKSPACE 'fc-case-test.h'
+          $errors = Join-Path $env:GITHUB_WORKSPACE 'fc-case-stderr.log'
+          $inputFile = Join-Path $source 'fccase.tmpl.h'
+          $caseFile = Join-Path $source 'CaseFolding.txt'
+
+          foreach ($file in @($exe, $inputFile, $caseFile)) {
+            if (-not (Test-Path $file)) { throw "Missing: $file" }
+          }
+          Write-Host "Executable: $exe"
+
+          # ProcDump launches and monitors fc-case.exe directly, not cmd.exe.
+          # -e captures an unhandled exception, and -t also captures termination.
+          # -ma requests a full-memory dump. The generator's stdin is preserved.
+          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
+          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+          $procDump = Join-Path $env:ChocolateyInstall 'lib/procdump/tools/procdump64.exe'
+          if (-not (Test-Path -LiteralPath $procDump)) {
+            $foundProcDump = Get-Command procdump64.exe -ErrorAction SilentlyContinue
+            if (-not $foundProcDump) { throw 'ProcDump not found after Chocolatey installation' }
+            $procDump = $foundProcDump.Source
+          }
+          $procLog = Join-Path $env:GITHUB_WORKSPACE 'fc-case-procdump.log'
+          Write-Host "ProcDump: $procDump"
+          Write-Host "Dump directory: $dumpDir"
+          Write-Host 'Launching fc-case.exe through ProcDump...'
+
+          # Use cmd.exe only as a shell for stdin/stdout/stderr redirection.
+          # ProcDump itself launches the actual generator, ensuring it is monitored.
+          # stdout includes ProcDump status text and is diagnostic, NOT a usable fccase.h.
+          $command = '"{0}" -accepteula -ma -e -t -x "{1}" "{2}" "{3}" < "{4}" > "{5}" 2> "{6}"' -f `
+            $procDump, $dumpDir, $exe, $caseFile, $inputFile, $procLog, $errors
+          $batchFile = Join-Path $env:GITHUB_WORKSPACE 'run-fc-case-procdump.cmd'
+          @('@echo off', $command, 'exit /b %errorlevel%') |
+            Set-Content -LiteralPath $batchFile -Encoding ascii
+          & cmd.exe /d /c $batchFile
+          $result = $LASTEXITCODE
+          Write-Host "ProcDump exit code: $result"
+          Write-Host ('ProcDump exit hex: 0x{0:X8}' -f ([uint32]([int64]$result -band 0xffffffffL)))
+          if (Test-Path $procLog) { Get-Content $procLog -Tail 100 }
+          if (Test-Path $errors) { Get-Content $errors -Tail 100 }
+          $dumps = @(Get-ChildItem $dumpDir -Filter '*.dmp' -File -ErrorAction SilentlyContinue)
+          Write-Host "Crash dumps produced: $($dumps.Count)"
+          $dumps | ForEach-Object { Write-Host "$($_.Name) ($($_.Length) bytes)" }
+          if ($dumps.Count -eq 0) { Write-Warning 'ProcDump did not produce a dump.' }
+          if ($result -ne 0) { exit 1 }
+
+      - name: Collect crash event details
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE 'crash-events.log'
+          $now = Get-Date
+          "Application crash events collected at $now" | Set-Content -Path $log
+          try {
+            $events = @(Get-WinEvent -FilterHashtable @{
+              LogName = 'Application'
+              StartTime = $now.AddHours(-3)
+            } -ErrorAction Stop | Where-Object {
+              $_.ProviderName -in @('Application Error', 'Windows Error Reporting') -and
+              $_.Message -match 'fc-case|miktex-tangle|miktex-ctangle'
+            })
+            if ($events.Count -eq 0) {
+              'No matching crash events found.' | Add-Content -Path $log
+            } else {
+              $events | Format-List TimeCreated, Id, ProviderName, Message |
+                Out-String -Width 4096 | Add-Content -Path $log
+            }
+          } catch {
+            "Could not query Windows Application event log: $_" | Add-Content -Path $log
+          }
+          Get-Content -Path $log
+          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
+          if (Test-Path $dumpDir) {
+            Get-ChildItem $dumpDir -Recurse -File | Select-Object FullName, Length
+          }
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE 'build.log'
+          $binlog = Join-Path $env:GITHUB_WORKSPACE 'build.binlog'
+
+          # Build all targets, not only the fontconfig header generator.
+          & cmake --build build --config Release --parallel 4 -- /v:minimal "/bl:$binlog" 2>&1 |
+            Tee-Object -FilePath $log
+          $result = $LASTEXITCODE
+          if ($result -ne 0) { exit $result }
+
+      - name: Collect matching crash symbols
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Path debug-symbols -Force | Out-Null
+          if (Test-Path build) {
+            Get-ChildItem build -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.Name -eq 'fc-case.exe' -or $_.Name -eq 'fc-case.pdb' -or
+                $_.Name -like 'MiKTeX*.pdb' -or $_.Name -like 'MiKTeX*.dll'
+              } | ForEach-Object {
+                $relative = [IO.Path]::GetRelativePath((Resolve-Path build).Path, $_.FullName)
+                $dst = Join-Path debug-symbols $relative
+                New-Item -ItemType Directory -Path (Split-Path $dst) -Force | Out-Null
+                Copy-Item $_.FullName $dst -Force
+              }
+          }
+
+      - name: Stage executables (not an installer)
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/bin | Out-Null
+          $bins = Get-ChildItem build -Recurse -File -Filter *.exe | Where-Object { $_.FullName -match '[\\/]Release[\\/]' }
+          if (-not $bins) { throw 'No Release .exe files found; inspect build layout.' }
+          foreach ($f in $bins) {
+            # Flattening names can collide; retain relative path under build.
+            $relative = [IO.Path]::GetRelativePath((Resolve-Path build).Path, $f.FullName)
+            $dest = Join-Path 'artifacts/bin' $relative
+            New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+            Copy-Item -LiteralPath $f.FullName -Destination $dest
+          }
+          @'
+          Experimental MiKTeX Windows x64 unoptimized diagnostic build artifact.
+          Not a self-contained distribution or installer.
+          Built executables may need DLLs, data, and configuration files.
+          '@ | Set-Content artifacts/README.txt
+
+      - name: Upload compiled binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-windows-x64-v142-build
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics (even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miktex-v142-diagnostics
+          path: |
+            v142-compiler.log
+            v142-atl-install.log
+            build.log
+            build.binlog
+            fontconfig-build.log
+            fontconfig-build.binlog
+            build/CMakeCache.txt
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/CMakeFiles/CMakeError.log
+            build/CMakeFiles/CMakeOutput.log
+            fc-case-stderr.log
+            fc-case-test.h
+            fc-case-procdump.log
+            run-fc-case-procdump.cmd
+            crash-dumps/
+            crash-events.log
+            triplets/
+            debug-symbols/
+          if-no-files-found: warn
+          retention-days: 14
