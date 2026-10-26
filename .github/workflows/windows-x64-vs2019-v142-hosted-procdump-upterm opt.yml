@@ -399,19 +399,17 @@ jobs:
           limit-access-to-actor: true
           wait-timeout-minutes: 60
 
-      - name: Diagnose Fontconfig generator
-        if: ${{ inputs.interactive_debug == true }}
+      # Run the generator directly. Its stdout is a generated header, not a log.
+      # This smoke test does not overwrite CMake's own generated build files.
+      - name: Verify Fontconfig header generation
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $log = Join-Path $env:GITHUB_WORKSPACE 'fontconfig-build.log'
           $binlog = Join-Path $env:GITHUB_WORKSPACE 'fontconfig-build.binlog'
-
-          # Capture the generator build even when it fails before the full build.
           & cmake --build build --config Release --target fc-case --parallel 1 -- /v:minimal "/bl:$binlog" 2>&1 |
             Tee-Object -FilePath $log
-          $buildExitCode = $LASTEXITCODE
-          if ($buildExitCode -ne 0) { exit $buildExitCode }
+          if ($LASTEXITCODE -ne 0) { throw 'fc-case build failed.' }
 
           $exe = Join-Path $env:GITHUB_WORKSPACE 'build/sandbox/miktex/bin/x64/fc-case.exe'
           $source = Join-Path $env:GITHUB_WORKSPACE 'Libraries/3rd/fontconfig/source/fc-case'
@@ -419,47 +417,58 @@ jobs:
           $errors = Join-Path $env:GITHUB_WORKSPACE 'fc-case-stderr.log'
           $inputFile = Join-Path $source 'fccase.tmpl.h'
           $caseFile = Join-Path $source 'CaseFolding.txt'
-
           foreach ($file in @($exe, $inputFile, $caseFile)) {
-            if (-not (Test-Path $file)) { throw "Missing: $file" }
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing: $file" }
           }
-          Write-Host "Executable: $exe"
+          # cmd.exe handles byte-preserving stdin/stdout redirection; no ProcDump
+          # messages or PowerShell text encodings are mixed into the header.
+          $command = '"{0}" "{1}" < "{2}" > "{3}" 2> "{4}"' -f `
+            $exe, $caseFile, $inputFile, $output, $errors
+          $batchFile = Join-Path $env:GITHUB_WORKSPACE 'run-fc-case-direct.cmd'
+          @('@echo off', $command, 'exit /b %errorlevel%') |
+            Set-Content -LiteralPath $batchFile -Encoding ascii
+          & cmd.exe /d /c $batchFile
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $errors) { Get-Content $errors -Tail 100 }
+            throw "fc-case execution failed: $LASTEXITCODE"
+          }
+          if (-not (Test-Path -LiteralPath $output -PathType Leaf) -or
+              (Get-Item -LiteralPath $output).Length -eq 0) {
+            throw 'fc-case produced no header content.'
+          }
+          Write-Host "fc-case generated $((Get-Item $output).Length) bytes into $output"
 
-          # ProcDump launches and monitors fc-case.exe directly, not cmd.exe.
-          # -e captures an unhandled exception, and -t also captures termination.
-          # -ma requests a full-memory dump. The generator's stdin is preserved.
+      # Optional reproduction under ProcDump; do not use -t, since it creates
+      # dumps even for a normal exit (0). Never use its output as a header.
+      - name: Diagnose fc-case with ProcDump (interactive only)
+        if: ${{ inputs.interactive_debug == true }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'build/sandbox/miktex/bin/x64/fc-case.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'Libraries/3rd/fontconfig/source/fc-case'
+          $inputFile = Join-Path $source 'fccase.tmpl.h'
+          $caseFile = Join-Path $source 'CaseFolding.txt'
           $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crash-dumps'
           New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
           $procDump = Join-Path $env:ChocolateyInstall 'lib/procdump/tools/procdump64.exe'
           if (-not (Test-Path -LiteralPath $procDump)) {
-            $foundProcDump = Get-Command procdump64.exe -ErrorAction SilentlyContinue
-            if (-not $foundProcDump) { throw 'ProcDump not found after Chocolatey installation' }
-            $procDump = $foundProcDump.Source
+            $found = Get-Command procdump64.exe -ErrorAction SilentlyContinue
+            if (-not $found) { throw 'ProcDump is unavailable.' }
+            $procDump = $found.Source
           }
           $procLog = Join-Path $env:GITHUB_WORKSPACE 'fc-case-procdump.log'
-          Write-Host "ProcDump: $procDump"
-          Write-Host "Dump directory: $dumpDir"
-          Write-Host 'Launching fc-case.exe through ProcDump...'
-
-          # Use cmd.exe only as a shell for stdin/stdout/stderr redirection.
-          # ProcDump itself launches the actual generator, ensuring it is monitored.
-          # stdout includes ProcDump status text and is diagnostic, NOT a usable fccase.h.
-          $command = '"{0}" -accepteula -ma -e -t -x "{1}" "{2}" "{3}" < "{4}" > "{5}" 2> "{6}"' -f `
+          $errors = Join-Path $env:GITHUB_WORKSPACE 'fc-case-procdump-stderr.log'
+          $command = '"{0}" -accepteula -ma -e -x "{1}" "{2}" "{3}" < "{4}" > "{5}" 2> "{6}"' -f `
             $procDump, $dumpDir, $exe, $caseFile, $inputFile, $procLog, $errors
           $batchFile = Join-Path $env:GITHUB_WORKSPACE 'run-fc-case-procdump.cmd'
           @('@echo off', $command, 'exit /b %errorlevel%') |
             Set-Content -LiteralPath $batchFile -Encoding ascii
           & cmd.exe /d /c $batchFile
           $result = $LASTEXITCODE
-          Write-Host "ProcDump exit code: $result"
-          Write-Host ('ProcDump exit hex: 0x{0:X8}' -f ([uint32]([int64]$result -band 0xffffffffL)))
-          if (Test-Path $procLog) { Get-Content $procLog -Tail 100 }
-          if (Test-Path $errors) { Get-Content $errors -Tail 100 }
-          $dumps = @(Get-ChildItem $dumpDir -Filter '*.dmp' -File -ErrorAction SilentlyContinue)
-          Write-Host "Crash dumps produced: $($dumps.Count)"
-          $dumps | ForEach-Object { Write-Host "$($_.Name) ($($_.Length) bytes)" }
-          if ($dumps.Count -eq 0) { Write-Warning 'ProcDump did not produce a dump.' }
-          if ($result -ne 0) { exit 1 }
+          if (Test-Path $procLog) { Get-Content $procLog -Tail 50 }
+          if (Test-Path $errors) { Get-Content $errors -Tail 50 }
+          if ($result -ne 0) { throw "ProcDump fc-case diagnostic failed: $result" }
 
       - name: Collect crash event details
         if: always()
@@ -640,6 +649,8 @@ jobs:
             build/CMakeFiles/CMakeError.log
             build/CMakeFiles/CMakeOutput.log
             fc-case-stderr.log
+            run-fc-case-direct.cmd
+            fc-case-procdump-stderr.log
             fc-case-test.h
             fc-case-procdump.log
             run-fc-case-procdump.cmd
