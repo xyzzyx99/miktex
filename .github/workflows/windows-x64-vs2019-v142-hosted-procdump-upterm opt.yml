@@ -229,14 +229,14 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           # Force dependencies to use the same VS2019 toolset as MiKTeX.
-          $triplet = 'x64-windows-static-v142'
+          $triplet = 'x64-windows-static-md-v142'
           New-Item -ItemType Directory -Path 'triplets' -Force | Out-Null
           @'
           set(VCPKG_TARGET_ARCHITECTURE x64)
-          set(VCPKG_CRT_LINKAGE static)
+          set(VCPKG_CRT_LINKAGE dynamic)
           set(VCPKG_LIBRARY_LINKAGE static)
           set(VCPKG_PLATFORM_TOOLSET v142)
-          '@ | Set-Content 'triplets/x64-windows-static-v142.cmake' -Encoding ascii
+          '@ | Set-Content 'triplets/x64-windows-static-md-v142.cmake' -Encoding ascii
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
       
@@ -265,19 +265,18 @@ jobs:
           "BOOST_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
           "ICU_INSTALL_ROOT=$root" >> $env:GITHUB_ENV
           
-      - name: Configure x64 Release using VS2019 v142 without optimization
+      - name: Configure optimized x64 Release using VS2019 v142
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           if (-not $vcpkgRoot) { throw 'VCPKG_INSTALLATION_ROOT is not set' }
           $toolchain = Join-Path $vcpkgRoot 'scripts/buildsystems/vcpkg.cmake'
-          $boostRoot = Join-Path $vcpkgRoot 'installed/x64-windows-static-v142'
+          $boostRoot = Join-Path $vcpkgRoot 'installed/x64-windows-static-md-v142'
           if (-not (Test-Path $toolchain)) { throw "vcpkg toolchain not found: $toolchain" }
           Write-Host "Using toolchain: $toolchain"
 
-          # Disable MSVC compiler optimizations for this diagnostic build.
-          # Dependencies supplied by vcpkg may still be preoptimized.
+          # Optimize for speed without whole-program optimization (LibreSSL export generator compatibility).
           # Construct arguments as separate strings to avoid PowerShell expansion/quoting errors.
           $cmakeArgs = @(
             '-S', '.'
@@ -292,22 +291,22 @@ jobs:
             "-DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/stage"
             "-DCMAKE_PREFIX_PATH=${{ steps.qt.outputs.prefix }}"
             '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL'
-            '-DCMAKE_C_FLAGS_RELEASE=/MD /O2 /Oi /GL /arch:AVX2 /DNDEBUG'
-            '-DCMAKE_CXX_FLAGS_RELEASE=/MD /O2 /Oi /GL /arch:AVX2 /DNDEBUG'
-            '-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
-            '-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
-            '-DCMAKE_MODULE_LINKER_FLAGS_RELEASE=/LTCG /OPT:REF /OPT:ICF'
+            '-DCMAKE_C_FLAGS_RELEASE=/MD /O2 /Oi /arch:AVX2 /DNDEBUG'
+            '-DCMAKE_CXX_FLAGS_RELEASE=/MD /O2 /Oi /arch:AVX2 /DNDEBUG'
+            '-DCMAKE_EXE_LINKER_FLAGS_RELEASE=/OPT:REF /OPT:ICF /INCREMENTAL:NO'
+            '-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/OPT:REF /OPT:ICF /INCREMENTAL:NO'
+            '-DCMAKE_MODULE_LINKER_FLAGS_RELEASE=/OPT:REF /OPT:ICF /INCREMENTAL:NO'
             "-DBISON_EXECUTABLE=$env:BISON_EXECUTABLE"
             "-DFLEX_EXECUTABLE=$env:FLEX_EXECUTABLE"
             "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
-            '-DVCPKG_TARGET_TRIPLET=x64-windows-static-v142'
+            '-DVCPKG_TARGET_TRIPLET=x64-windows-static-md-v142'
             "-DVCPKG_OVERLAY_TRIPLETS=$env:GITHUB_WORKSPACE/triplets"
             "-DBOOST_ROOT=$boostRoot"
             "-DBoost_ROOT=$boostRoot"
             "-DBoost_INCLUDE_DIR=$(Join-Path $boostRoot 'include')"
             "-DBOOST_LIBRARYDIR=$(Join-Path $boostRoot 'lib')"
             '-DBoost_USE_STATIC_LIBS=ON'
-            '-DBoost_USE_STATIC_RUNTIME=ON'
+            '-DBoost_USE_STATIC_RUNTIME=OFF'
             "-DICU_ROOT=$env:ICU_INSTALL_ROOT"
             "-DICU_INCLUDE_DIR=$env:ICU_INSTALL_ROOT/include"
           )
@@ -494,22 +493,28 @@ jobs:
               }
           }
 
-      - name: Stage executables (not an installer)
+      - name: Stage executables and runtime DLLs (not an installer)
         run: |
-          New-Item -ItemType Directory -Force -Path artifacts/bin | Out-Null
-          $bins = Get-ChildItem build -Recurse -File -Filter *.exe | Where-Object { $_.FullName -match '[\\/]Release[\\/]' }
-          if (-not $bins) { throw 'No Release .exe files found; inspect build layout.' }
-          foreach ($f in $bins) {
-            # Flattening names can collide; retain relative path under build.
-            $relative = [IO.Path]::GetRelativePath((Resolve-Path build).Path, $f.FullName)
-            $dest = Join-Path 'artifacts/bin' $relative
-            New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
-            Copy-Item -LiteralPath $f.FullName -Destination $dest
+          $ErrorActionPreference = 'Stop'
+          $bin = 'build/sandbox/miktex/bin/x64'
+          if (-not (Test-Path -LiteralPath $bin -PathType Container)) {
+            throw "Missing MiKTeX binary directory: $bin"
           }
+          $files = @(Get-ChildItem -LiteralPath $bin -File |
+            Where-Object { $_.Extension -in @('.exe', '.dll') })
+          if (@($files | Where-Object Extension -eq '.exe').Count -eq 0) {
+            throw "No MiKTeX executables found in $bin"
+          }
+          $dest = 'artifacts/bin'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          foreach ($f in $files) {
+            Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $dest $f.Name) -Force
+          }
+          "Staged $(@($files | Where-Object Extension -eq '.exe').Count) EXEs and $(@($files | Where-Object Extension -eq '.dll').Count) DLLs"
           @'
-          Experimental MiKTeX Windows x64 unoptimized diagnostic build artifact.
+          Experimental MiKTeX Windows x64 optimized build artifact (/MD, /O2, /Oi, AVX2).
           Not a self-contained distribution or installer.
-          Built executables may need DLLs, data, and configuration files.
+          Programs may need TeX resources, configuration, and additional dependencies.
           '@ | Set-Content artifacts/README.txt
 
       - name: Upload compiled binaries
